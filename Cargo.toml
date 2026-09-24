@@ -28,6 +28,9 @@ path = "src/main.rs"
 [dependencies]
 pcre2.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
+
 [lints.rust]
 unsafe_code = "forbid"
 

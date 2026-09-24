@@ -8,6 +8,9 @@ set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 ack3=$(cd "${ACK3_DIR:-$here/../ack3}" && pwd)
 rask="${RASK:-${CARGO_TARGET_DIR:-$here/target}/release/rask}"
+# Both acks run from the ack3 checkout, so make a relative $RASK absolute.
+case "$rask" in /*) ;; *) rask="$PWD/$rask" ;; esac
+case "$rask" in /*) ;; *) rask="$PWD/$rask" ;; esac
 [ -x "$rask" ] || { echo "build rask first: cargo build --release" >&2; exit 2; }
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
