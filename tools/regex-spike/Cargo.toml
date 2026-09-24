@@ -1,0 +1,15 @@
+[package]
+name = "regex-spike"
+version = "0.0.0"
+description = "Compares candidate regex engines against Perl on the regexes ack builds"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+pcre2.workspace = true
+fancy-regex = "0.19"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

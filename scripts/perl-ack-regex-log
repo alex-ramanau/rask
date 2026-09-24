@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs Perl ack with RegexLog loaded, which logs every regex ack builds to
+# $RASK_REGEX_LOG. Used as ACK_TEST_BINARY by scripts/regex-spike.
+here=$(cd "$(dirname "$0")/.." && pwd)
+: "${ACK3_DIR:?set ACK3_DIR to an ack3 checkout}"
+exec perl -I"$ACK3_DIR/blib/lib" -I"$here/tools/regex-spike/perl" -MRegexLog \
+    "$ACK3_DIR/blib/script/ack" "$@"

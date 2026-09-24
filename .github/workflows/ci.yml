@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The ack3 checkout whose test suite is the spec. Until the ACK_TEST_BINARY
+  # harness change is merged upstream, ci/ack3-test-binary.patch is applied.
+  ACK3_REPOSITORY: beyondgrep/ack3
+  ACK3_REF: dev
+
+jobs:
+  rust:
+    name: cargo (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all
+
+  ack-suite:
+    name: ack3 suite (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rask
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.ACK3_REPOSITORY }}
+          ref: ${{ env.ACK3_REF }}
+          path: ack3
+      - name: Apply ACK_TEST_BINARY harness patch if needed
+        shell: bash
+        working-directory: ack3
+        run: grep -q ACK_TEST_BINARY t/Util.pm || git apply ../rask/ci/ack3-test-binary.patch
+      - uses: shogo82148/actions-setup-perl@v1
+        with:
+          perl-version: '5.38'
+          install-modules: File::Next YAML::PP ${{ runner.os == 'Windows' && 'Win32::ShellQuote' || 'IO::Pty' }}
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build ack3 (some tests use App::Ack as the oracle)
+        shell: bash
+        working-directory: ack3
+        run: perl Makefile.PL && $(perl -MConfig -e 'print $Config{make}')
+      - run: cargo build
+        working-directory: rask
+      - name: Run the ack3 suite against rask
+        shell: bash
+        working-directory: rask
+        env:
+          ACK3_DIR: ${{ github.workspace }}/ack3
+        # Reports pass counts; doesn't fail the job until Phase 4 makes the suite green.
+        run: perl scripts/ack-suite --markdown "$GITHUB_STEP_SUMMARY"
