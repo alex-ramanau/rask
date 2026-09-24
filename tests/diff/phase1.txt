@@ -1,0 +1,50 @@
+# Command lines for scripts/diff-ack --cases. Run from the ack3 checkout.
+consecrated t/text
+strict t/swamp/options.pl
+-i APPLE t/swamp/groceries
+-c God t/text
+-l strict t/text
+-L strict t/text
+-w foo t/text
+-f t/swamp
+-f --sort-files t/swamp
+-v w t/text/ozymandias.txt
+-C 2 Montresor t/text
+-A 1 -B 3 Montresor t/text
+'('
+'foo{'
+-w -foo t/text
+--col x
+-q x
++x foo t/text
+-f --perl t/swamp
+-g fresh t/swamp
+-g -i FRESH t/swamp
+--output='x$1y' '(ac)t' t/text/raven.txt
+-o 'ac.' t/text/raven.txt
+--passthru Nevermore t/text/raven.txt
+-m 3 -w the t/text/bill-of-rights.txt t/text/constitution.txt
+-1 -h Montresor t/text
+--nofilter strict t/swamp
+--type=foo x t/text
+-t perl strict t/swamp
+-T perl strict t/swamp
+--noperl strict t/swamp
+--and=free --not=speech the t/text
+--or=Montresor --or=Fortunato God t/text
+-p 2 the t/text/gettysburg.txt
+--range-start=^Four --range-end=^Now the t/text/gettysburg.txt
+--column -w the t/text/gettysburg.txt
+--color the t/text/gettysburg.txt
+--color --underline -w the t/text/gettysburg.txt
+--heading --break the t/text/gettysburg.txt t/text/ozymandias.txt
+--print0 -l the t/text
+search-term non-existent-file.txt
+-s search-term non-existent-file.txt
+--ignore-dir=text foo t
+--noignore-dir=blib -f t/swamp
+--ignore-file=ext:txt -f t/text
+--dump
+--help
+-x the
+--files-from=nonexistent the
