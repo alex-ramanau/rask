@@ -39,9 +39,9 @@ fn swamp_files(ack3: &std::path::Path) -> Vec<(String, File)> {
         follow_symlinks: true,
     };
     Files::new(opts, &[start])
-        .map(|name| {
-            let relative = lossy(&name[root.len() + 1..]);
-            (relative, File::new(name))
+        .map(|file| {
+            let relative = lossy(&file.name[root.len() + 1..]);
+            (relative, file)
         })
         .collect()
 }

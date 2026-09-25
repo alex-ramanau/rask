@@ -100,7 +100,7 @@ fn expected(a: Option<i64>, b: Option<i64>, pager: Option<&str>) -> String {
         b,
         pager: pager.map(|p| p.as_bytes().to_vec()),
         filters: vec![rask::filter::FilterRef {
-            filter: std::rc::Rc::new(Filter::Default),
+            filter: std::sync::Arc::new(Filter::Default),
             inverted: false,
         }],
         ..Opt::default()

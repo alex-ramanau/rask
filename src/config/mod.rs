@@ -8,9 +8,8 @@
 pub mod finder;
 mod mutex;
 
-use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use crate::bytes::{Bytes, errno_text, lossy, to_path};
 use crate::cli::getopt::{self, Config, HandlerError, Spec, Value};
@@ -40,8 +39,9 @@ pub struct Source {
 }
 
 /// An `--ignore-dir`/`--noignore-dir` collection, possibly inverted.
+#[derive(Clone)]
 pub struct IgnoreDir {
-    pub collection: Rc<RefCell<Collection>>,
+    pub collection: Arc<Mutex<Collection>>,
     pub inverted: bool,
 }
 
@@ -184,7 +184,7 @@ fn process_filetypes(sources: &mut [Source]) -> Types {
                 match act {
                     TypeAct::Add | TypeAct::Set => {
                         let (name, filter) = process_filter_spec(&v).map_err(HandlerError::Died)?;
-                        let filter = Rc::new(filter);
+                        let filter = Arc::new(filter);
                         if *act == TypeAct::Add {
                             types.mappings.entry(name.clone()).or_default().push(filter);
                         } else {
@@ -384,7 +384,7 @@ fn add_ignore_dir(opt: &mut Opt, option_name: &str, dir: &[u8]) -> Result<(), St
             lossy(&kind)
         )));
     }
-    let filter = Rc::new(crate::filter::Filter::create(&kind, &split_commas(&args))?);
+    let filter = Arc::new(crate::filter::Filter::create(&kind, &split_commas(&args))?);
 
     let previous_inversion_matches = opt
         .idirs
@@ -393,16 +393,19 @@ fn add_ignore_dir(opt: &mut Opt, option_name: &str, dir: &[u8]) -> Result<(), St
     let collection = if previous_inversion_matches {
         opt.idirs.last().unwrap().collection.clone()
     } else {
-        let c = Rc::new(RefCell::new(Collection::default()));
+        let c = Arc::new(Mutex::new(Collection::default()));
         opt.idirs.push(IgnoreDir {
             collection: c.clone(),
             inverted: is_inverted,
         });
         c
     };
-    collection.borrow_mut().add(filter);
+    collection.lock().unwrap().add(filter);
     if kind == b"is" {
-        collection.borrow_mut().add(Rc::new(Filter::IsPath(args)));
+        collection
+            .lock()
+            .unwrap()
+            .add(Arc::new(Filter::IsPath(args)));
     }
     Ok(())
 }
@@ -440,7 +443,7 @@ fn toggle_type(opt: &mut Opt, types: &Types, name: &str, on: bool) {
     if on {
         // _uninvert_filter: drop inverted copies of these filters.
         opt.filters
-            .retain(|f| !(f.inverted && filters.iter().any(|g| Rc::ptr_eq(g, &f.filter))));
+            .retain(|f| !(f.inverted && filters.iter().any(|g| Arc::ptr_eq(g, &f.filter))));
     }
     opt.filters
         .extend(filters.into_iter().map(|filter| FilterRef {
@@ -525,7 +528,7 @@ fn handle(
                 crate::filter::Filter::create(&kind, &split_commas(&args.unwrap_or_default()))?;
             opt.ifiles
                 .get_or_insert_with(Collection::default)
-                .add(Rc::new(filter));
+                .add(Arc::new(filter));
         }
         FilesWithMatches => opt.l = true,
         FilesWithoutMatches => opt.big_l = true,
@@ -869,7 +872,7 @@ pub fn process_args(mut sources: Vec<Source>) -> Processed {
     // Throw the default filter in if no others are selected.
     if !opt.filters.iter().any(|f| !f.inverted) {
         opt.filters.push(FilterRef {
-            filter: Rc::new(Filter::Default),
+            filter: Arc::new(Filter::Default),
             inverted: false,
         });
     }

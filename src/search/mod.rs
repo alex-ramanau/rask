@@ -6,6 +6,7 @@
 use std::io::{BufRead, BufReader, Read};
 
 use crate::bytes::{Bytes, errno_text, lossy, to_path};
+use crate::filter::{File, texttest};
 use crate::matcher::{Matcher, PcreMatcher};
 use crate::output::{self, color::Color};
 
@@ -110,7 +111,7 @@ pub struct Stats {
 /// Reads lines the way `<$fh>` does, with the trailing newline removed (`chomp`).
 enum Lines {
     Buffer { data: Bytes, pos: usize },
-    Stream(Box<dyn BufRead>),
+    Stream(Box<dyn BufRead + Send>),
 }
 
 impl Lines {
@@ -142,11 +143,47 @@ impl Lines {
 }
 
 /// An opened file: what `$file->open` gives, plus what the prescan read.
-struct Opened {
+pub struct Opened {
     lines: Lines,
+    /// For a file read into memory: where each line's first match starts,
+    /// plus one (0 for no match), as `Settings::matches` gives it. Computed by
+    /// the worker thread, so the printing thread doesn't run the regex.
+    matches: Option<Vec<u32>>,
+}
+
+impl Opened {
+    fn stream(lines: Lines) -> Opened {
+        Opened {
+            lines,
+            matches: None,
+        }
+    }
 }
 
 const PRESCAN_SIZE: usize = 10_000_000;
+
+/// Reads from `reader` until `buf` holds `limit` bytes or the file ends.
+fn read_up_to(reader: &mut dyn Read, buf: &mut Bytes, limit: usize) -> std::io::Result<()> {
+    let start = buf.len();
+    if limit <= start {
+        return Ok(());
+    }
+    buf.resize(limit, 0);
+    let mut len = start;
+    while len < limit {
+        match reader.read(&mut buf[len..]) {
+            Ok(0) => break,
+            Ok(n) => len += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => {
+                buf.truncate(len);
+                return Err(e);
+            }
+        }
+    }
+    buf.truncate(len);
+    Ok(())
+}
 
 /// Strips trailing `\r` and `\n` characters (`s/[\r\n]+$//`).
 fn strip_line_ending(line: &[u8]) -> &[u8] {
@@ -169,8 +206,288 @@ fn for_each_match(re: &PcreMatcher, line: &[u8], mut f: impl FnMut(usize, usize)
     }
 }
 
+/// What a run does with each selected file, before printing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// `-f` and `-g`: list the file.
+    List,
+    /// `-c`, `-l`, `-L`: count matching lines (stopping at the first for `-l`/`-L`).
+    Count { bail: bool },
+    /// Everything else: open and prescan the file for printing its matches.
+    Search,
+}
+
+/// A selected file, with the work done that doesn't depend on what has been
+/// printed so far. This can happen on any thread; the printing can't.
+pub enum Prepared {
+    Listed {
+        name: Bytes,
+        types: Option<Bytes>,
+    },
+    Counted {
+        name: Bytes,
+        count: u64,
+    },
+    Searched {
+        name: Bytes,
+        /// Whether the prescan was done (for `--debug`).
+        prescanned: bool,
+        /// `None` if the prescan found nothing (the file isn't scanned).
+        scan: Option<Option<Opened>>,
+    },
+}
+
+impl Settings {
+    /// Does the per-file work for `mode`. Warnings are printed with
+    /// `output::warn` (which workers capture, to print them in order).
+    pub fn prepare(&self, file: File, mode: Mode) -> Prepared {
+        let name = file.name.clone();
+        match mode {
+            Mode::List => {
+                let types = self.show_types.as_ref().map(|types| {
+                    // App::Ack::show_types
+                    let ctx = crate::filter::FilterContext {
+                        report_bad_filenames: self.report_bad_filenames,
+                    };
+                    let mut matched: Vec<&String> = types
+                        .mappings
+                        .iter()
+                        .filter(|(_, filters)| filters.iter().any(|f| f.matches(&file, &ctx)))
+                        .map(|(k, _)| k)
+                        .collect();
+                    matched.sort();
+                    let list: Vec<&str> = matched.iter().map(|s| s.as_str()).collect();
+                    let arrow: &[u8] = if list.is_empty() { b" =>" } else { b" => " };
+                    [&name[..], arrow, list.join(",").as_bytes()].concat()
+                });
+                Prepared::Listed { name, types }
+            }
+            Mode::Count { bail } => Prepared::Counted {
+                count: self.count_matches_in_file(file, bail),
+                name,
+            },
+            Mode::Search => {
+                let prescan = !self.passthru && !self.v;
+                let scan = match self.open_and_prescan(file, prescan, true) {
+                    Ok(None) => None,
+                    Ok(Some(o)) => Some(Some(o)),
+                    // print_matches_in_file reports the error.
+                    Err(e) => {
+                        self.warn_bad(format!(
+                            "{}: {}",
+                            lossy(&safe_filename(&name)),
+                            errno_text(&e)
+                        ));
+                        Some(None)
+                    }
+                };
+                Prepared::Searched {
+                    name,
+                    prescanned: prescan,
+                    scan,
+                }
+            }
+        }
+    }
+
+    fn warn_bad(&self, msg: String) {
+        if self.report_bad_filenames {
+            output::warn(&msg);
+        }
+    }
+
+    fn open(&self, name: &[u8]) -> std::io::Result<Box<dyn Read + Send>> {
+        if name == b"-" {
+            return Ok(Box::new(std::io::stdin()));
+        }
+        Ok(Box::new(std::fs::File::open(to_path(name))?))
+    }
+
+    fn is_regular(name: &[u8]) -> bool {
+        if name == b"-" {
+            return stdin_is_regular_file();
+        }
+        std::fs::metadata(to_path(name))
+            .map(|m| m.is_file())
+            .unwrap_or(false)
+    }
+
+    /// `$file->may_be_present( $re_scan )`, which also opens the file.
+    /// Returns None if the file can't contain a match, or the opened file.
+    ///
+    /// The file may already be open, with its first block read (by the `-T`
+    /// test); both are reused.
+    ///
+    /// With `table`, a file read into memory also gets its `Opened::matches`.
+    fn open_and_prescan(
+        &self,
+        file: File,
+        prescan: bool,
+        table: bool,
+    ) -> Result<Option<Opened>, std::io::Error> {
+        let regular = file
+            .is_regular
+            .unwrap_or_else(|| Self::is_regular(&file.name));
+        // A short first block means the whole file has been read.
+        let head_is_whole_file =
+            file.head_is_read() && file.head().is_ok_and(|h| h.len() < texttest::BLOCK);
+        let name = file.name.clone();
+        let (handle, head) = file.into_parts();
+        let size = if regular && !head_is_whole_file {
+            handle
+                .as_ref()
+                .and_then(|h| h.metadata().ok())
+                .map(|m| m.len() as usize)
+        } else {
+            None
+        };
+        let mut reader: Box<dyn Read + Send> = match handle {
+            Some(h) => Box::new(h),
+            None => self.open(&name)?,
+        };
+        // Regular files are read into memory (up to 10M, as Perl's prescan
+        // reads them), so the worker can find the matching lines.
+        if regular {
+            let mut buf = head;
+            if !head_is_whole_file {
+                // Like Perl's single sysread of up to 10M: read the size the
+                // file has (from fstat), without an extra read to find the end.
+                let limit = size.map_or(PRESCAN_SIZE, |s| s.min(PRESCAN_SIZE));
+                let result = if size.is_some() {
+                    read_up_to(&mut reader, &mut buf, limit)
+                } else {
+                    reader
+                        .by_ref()
+                        .take((PRESCAN_SIZE - buf.len()) as u64)
+                        .read_to_end(&mut buf)
+                        .map(|_| ())
+                };
+                if let Err(e) = result {
+                    if prescan && self.re_scan.is_some() {
+                        // may_be_present's sysread failed: the file is skipped.
+                        self.warn_bad(format!("{}: {}", lossy(&name), errno_text(&e)));
+                        return Ok(None);
+                    }
+                    // Otherwise Perl's line reading just stops.
+                    return Ok(Some(Opened::stream(Lines::Buffer { data: buf, pos: 0 })));
+                }
+            }
+            // If we read all 10M, scan the rest too, line by line.
+            if buf.len() == PRESCAN_SIZE {
+                let rest: Box<dyn Read + Send> = Box::new(std::io::Cursor::new(buf).chain(reader));
+                return Ok(Some(Opened::stream(Lines::Stream(Box::new(
+                    BufReader::new(rest),
+                )))));
+            }
+            // The prescan, unless there are carriage returns.
+            if prescan
+                && let Some(scan) = &self.re_scan
+                && !buf.contains(&b'\r')
+                && !scan.is_match(&buf)
+            {
+                return Ok(None);
+            }
+            let matches = if table { self.line_matches(&buf) } else { None };
+            return Ok(Some(Opened {
+                lines: Lines::Buffer { data: buf, pos: 0 },
+                matches,
+            }));
+        }
+        let reader: Box<dyn Read + Send> = if head.is_empty() {
+            reader
+        } else {
+            Box::new(std::io::Cursor::new(head).chain(reader))
+        };
+        Ok(Some(Opened::stream(Lines::Stream(Box::new(
+            BufReader::with_capacity(64 * 1024, reader),
+        )))))
+    }
+
+    /// `Opened::matches` for a file in memory. Lines are split exactly as
+    /// `Lines::next_line` splits them.
+    fn line_matches(&self, data: &[u8]) -> Option<Vec<u32>> {
+        self.re_match.as_ref()?;
+        Some(
+            data.split_inclusive(|&c| c == b'\n')
+                .map(|line| {
+                    let line = line.strip_suffix(b"\n").unwrap_or(line);
+                    self.matches(line).map_or(0, |start| start as u32 + 1)
+                })
+                .collect(),
+        )
+    }
+
+    fn matches(&self, line: &[u8]) -> Option<usize> {
+        let m = self.re_match.as_ref()?.find_at(line, 0)?;
+        if let Some(not) = &self.re_not
+            && not.is_match(line)
+        {
+            return None;
+        }
+        Some(m.start)
+    }
+
+    fn range_setup(&self) -> bool {
+        let using_ranges = self.range_start.is_some() || self.range_end.is_some();
+        !using_ranges || (self.range_start.is_none() && self.range_end.is_some())
+    }
+
+    fn using_ranges(&self) -> bool {
+        self.range_start.is_some() || self.range_end.is_some()
+    }
+
+    fn range_starts(&self, in_range: bool, line: &[u8]) -> bool {
+        in_range
+            || (self.using_ranges() && self.range_start.as_ref().is_some_and(|r| r.is_match(line)))
+    }
+
+    fn range_ends(&self, in_range: bool, line: &[u8]) -> bool {
+        in_range
+            && !(self.using_ranges() && self.range_end.as_ref().is_some_and(|r| r.is_match(line)))
+    }
+
+    fn count_matches_in_file(&self, file: File, bail: bool) -> u64 {
+        let name = file.name.clone();
+        let opened = match self.open_and_prescan(file, !self.v, false) {
+            Err(e) => {
+                self.warn_bad(format!("{}: {}", lossy(&name), errno_text(&e)));
+                return 0;
+            }
+            Ok(None) => return 0,
+            Ok(Some(o)) => o,
+        };
+        let mut lines = opened.lines;
+        let mut nmatches = 0;
+        let mut in_range = self.range_setup();
+        let mut line = Vec::new();
+        while lines.next_line(&mut line) {
+            if self.using_ranges() {
+                in_range = self.range_starts(in_range, &line);
+                if in_range && (self.matches(&line).is_some() != self.v) {
+                    nmatches += 1;
+                    if bail {
+                        break;
+                    }
+                }
+                in_range = self.range_ends(in_range, &line);
+            } else if self.matches(&line).is_some() != self.v {
+                nmatches += 1;
+                if bail {
+                    break;
+                }
+            }
+        }
+        nmatches
+    }
+}
+
 pub struct Searcher {
-    pub s: Settings,
+    pub s: std::sync::Arc<Settings>,
+    /// Context lines after and before matches (`$n_after_ctx_lines`, ...).
+    a: usize,
+    b: usize,
+    /// `$opt_column`, which is turned off while printing context lines.
+    column: bool,
     pub stats: Stats,
     has_printed_from_any_file: bool,
     // Context tracking (the closure variables in ack's main loop).
@@ -186,8 +503,11 @@ pub struct Searcher {
 }
 
 impl Searcher {
-    pub fn new(s: Settings) -> Searcher {
+    pub fn new(s: std::sync::Arc<Settings>) -> Searcher {
         Searcher {
+            a: s.a,
+            b: s.b,
+            column: s.column,
             s,
             stats: Stats::default(),
             has_printed_from_any_file: false,
@@ -211,129 +531,19 @@ impl Searcher {
         output::write(b"\n");
     }
 
-    fn warn_bad(&self, msg: String) {
-        if self.s.report_bad_filenames {
-            output::warn(&msg);
-        }
-    }
-
-    fn open(&self, name: &[u8]) -> std::io::Result<Box<dyn Read>> {
-        if name == b"-" {
-            return Ok(Box::new(std::io::stdin()));
-        }
-        Ok(Box::new(std::fs::File::open(to_path(name))?))
-    }
-
-    fn is_regular(name: &[u8]) -> bool {
-        if name == b"-" {
-            return stdin_is_regular_file();
-        }
-        std::fs::metadata(to_path(name))
-            .map(|m| m.is_file())
-            .unwrap_or(false)
-    }
-
-    /// `$file->may_be_present( $re_scan )`, which also opens the file.
-    /// Returns None if the file can't contain a match, or the opened file.
-    fn open_and_prescan(
-        &mut self,
-        name: &[u8],
-        prescan: bool,
-    ) -> Result<Option<Opened>, std::io::Error> {
-        let mut reader = self.open(name)?;
-        if prescan
-            && let Some(scan) = &self.s.re_scan
-            && Self::is_regular(name)
-        {
-            let mut buf = Vec::new();
-            match reader
-                .by_ref()
-                .take(PRESCAN_SIZE as u64)
-                .read_to_end(&mut buf)
-            {
-                Err(e) => {
-                    self.warn_bad(format!("{}: {}", lossy(name), errno_text(&e)));
-                    return Ok(None);
-                }
-                Ok(n) => {
-                    // If we read all 10M, or there are carriage returns, scan it all.
-                    if n == PRESCAN_SIZE {
-                        let rest: Box<dyn Read> = Box::new(std::io::Cursor::new(buf).chain(reader));
-                        return Ok(Some(Opened {
-                            lines: Lines::Stream(Box::new(BufReader::new(rest))),
-                        }));
-                    }
-                    if !buf.contains(&b'\r') && !scan.is_match(&buf) {
-                        return Ok(None);
-                    }
-                    return Ok(Some(Opened {
-                        lines: Lines::Buffer { data: buf, pos: 0 },
-                    }));
-                }
-            }
-        }
-        Ok(Some(Opened {
-            lines: Lines::Stream(Box::new(BufReader::with_capacity(64 * 1024, reader))),
-        }))
-    }
-
-    fn matches(&self, line: &[u8]) -> Option<usize> {
-        let m = self.s.re_match.as_ref()?.find_at(line, 0)?;
-        if let Some(not) = &self.s.re_not
-            && not.is_match(line)
-        {
-            return None;
-        }
-        Some(m.start)
-    }
-
-    fn range_setup(&self) -> bool {
-        let using_ranges = self.s.range_start.is_some() || self.s.range_end.is_some();
-        !using_ranges || (self.s.range_start.is_none() && self.s.range_end.is_some())
-    }
-
-    fn using_ranges(&self) -> bool {
-        self.s.range_start.is_some() || self.s.range_end.is_some()
-    }
-
-    fn range_starts(&self, in_range: bool, line: &[u8]) -> bool {
-        in_range
-            || (self.using_ranges()
-                && self
-                    .s
-                    .range_start
-                    .as_ref()
-                    .is_some_and(|r| r.is_match(line)))
-    }
-
-    fn range_ends(&self, in_range: bool, line: &[u8]) -> bool {
-        in_range
-            && !(self.using_ranges() && self.s.range_end.as_ref().is_some_and(|r| r.is_match(line)))
-    }
-
     // ---- -f and -g ----
 
-    pub fn file_loop_fg(&mut self, files: &mut dyn Iterator<Item = Bytes>) -> u64 {
+    pub fn file_loop_fg(&mut self, files: &mut dyn Iterator<Item = Prepared>) -> u64 {
         let mut nmatches = 0;
-        for name in files {
-            if let Some(types) = &self.s.show_types {
-                // App::Ack::show_types
-                let file = crate::filter::File::new(name.clone());
-                let ctx = crate::filter::FilterContext {
-                    report_bad_filenames: self.s.report_bad_filenames,
-                };
-                let mut matched: Vec<&String> = types
-                    .mappings
-                    .iter()
-                    .filter(|(_, filters)| filters.iter().any(|f| f.matches(&file, &ctx)))
-                    .map(|(k, _)| k)
-                    .collect();
-                matched.sort();
-                let list: Vec<&str> = matched.iter().map(|s| s.as_str()).collect();
-                let arrow: &[u8] = if list.is_empty() { b" =>" } else { b" => " };
-                self.say(&[&name, arrow, list.join(",").as_bytes()]);
+        for prepared in files {
+            let Prepared::Listed { name, types } = prepared else {
+                unreachable!("file_loop_fg needs Mode::List")
+            };
+            if let Some(types) = types {
+                self.say(&[&types]);
             } else if self.s.g {
-                self.print_line_with_options(None, &safe_filename(&name), 0, self.s.ors, false);
+                let ors = self.s.ors;
+                self.print_line_with_options(None, &safe_filename(&name), 0, ors, false);
             } else {
                 self.say(&[&safe_filename(&name)]);
             }
@@ -347,11 +557,13 @@ impl Searcher {
 
     // ---- -c ----
 
-    pub fn file_loop_c(&mut self, files: &mut dyn Iterator<Item = Bytes>) -> u64 {
+    pub fn file_loop_c(&mut self, files: &mut dyn Iterator<Item = Prepared>) -> u64 {
         let mut nmatched_files = 0;
         let mut total_count = 0;
-        for name in files {
-            let count = self.count_matches_in_file(&name, false);
+        for prepared in files {
+            let Prepared::Counted { name, count } = prepared else {
+                unreachable!("file_loop_c needs Mode::Count")
+            };
             if count > 0 {
                 nmatched_files += 1;
             }
@@ -376,10 +588,13 @@ impl Searcher {
 
     // ---- -l and -L ----
 
-    pub fn file_loop_l(&mut self, files: &mut dyn Iterator<Item = Bytes>) -> u64 {
+    pub fn file_loop_l(&mut self, files: &mut dyn Iterator<Item = Prepared>) -> u64 {
         let mut nmatches = 0;
-        for name in files {
-            let is_match = self.count_matches_in_file(&name, true) > 0;
+        for prepared in files {
+            let Prepared::Counted { name, count } = prepared else {
+                unreachable!("file_loop_l needs Mode::Count")
+            };
+            let is_match = count > 0;
             if if self.s.big_l { !is_match } else { is_match } {
                 self.say(&[&name]);
                 nmatches += 1;
@@ -391,57 +606,32 @@ impl Searcher {
         nmatches as u64
     }
 
-    fn count_matches_in_file(&mut self, name: &[u8], bail: bool) -> u64 {
-        let opened = match self.open_and_prescan(name, !self.s.v) {
-            Err(e) => {
-                self.warn_bad(format!("{}: {}", lossy(name), errno_text(&e)));
-                return 0;
-            }
-            Ok(None) => return 0,
-            Ok(Some(o)) => o,
-        };
-        let mut lines = opened.lines;
-        let mut nmatches = 0;
-        let mut in_range = self.range_setup();
-        let mut line = Vec::new();
-        while lines.next_line(&mut line) {
-            if self.using_ranges() {
-                in_range = self.range_starts(in_range, &line);
-                if in_range && (self.matches(&line).is_some() != self.s.v) {
-                    nmatches += 1;
-                    if bail {
-                        break;
-                    }
-                }
-                in_range = self.range_ends(in_range, &line);
-            } else if self.matches(&line).is_some() != self.s.v {
-                nmatches += 1;
-                if bail {
-                    break;
-                }
-            }
-        }
-        nmatches
-    }
-
     // ---- normal searching ----
 
-    pub fn file_loop_normal(&mut self, files: &mut dyn Iterator<Item = Bytes>) -> u64 {
+    pub fn file_loop_normal(&mut self, files: &mut dyn Iterator<Item = Prepared>) -> u64 {
         let tracking_off = self.s.output.is_some();
         let (nb, na) = if tracking_off {
             (0, 0)
         } else {
-            (self.s.b, self.s.a)
+            (self.b, self.a)
         };
-        self.s.b = nb;
-        self.s.a = na;
+        self.b = nb;
+        self.a = na;
         self.before_context_buf = vec![None; nb];
         self.before_context_pos = 0;
         self.is_tracking_context = nb > 0 || na > 0;
         self.is_first_match = true;
 
         let mut nmatches = 0;
-        for name in files {
+        for prepared in files {
+            let Prepared::Searched {
+                name,
+                prescanned,
+                scan,
+            } = prepared
+            else {
+                unreachable!("file_loop_normal needs Mode::Search")
+            };
             if self.is_tracking_context {
                 self.printed_lineno = 0;
                 self.after_context_pending = 0;
@@ -449,31 +639,14 @@ impl Searcher {
                     self.is_first_match = true;
                 }
             }
-            let prescan = !self.s.passthru && !self.s.v;
-            if prescan {
+            if prescanned {
                 self.stats.prescans += 1;
             }
-            let opened = match self.open_and_prescan(&name, prescan) {
-                Ok(None) => {
-                    if self.s.one && nmatches > 0 {
-                        break;
-                    }
-                    continue;
+            if let Some(opened) = scan {
+                self.stats.linescans += 1;
+                if let Some(o) = opened {
+                    nmatches += self.print_matches_in_file(&name, o);
                 }
-                Ok(Some(o)) => Some(o),
-                // print_matches_in_file reports the error.
-                Err(e) => {
-                    self.warn_bad(format!(
-                        "{}: {}",
-                        lossy(&safe_filename(&name)),
-                        errno_text(&e)
-                    ));
-                    None
-                }
-            };
-            self.stats.linescans += 1;
-            if let Some(o) = opened {
-                nmatches += self.print_matches_in_file(&name, o);
             }
             if self.s.one && nmatches > 0 {
                 break;
@@ -495,14 +668,26 @@ impl Searcher {
             _ => -1,
         };
         let mut lines = opened.lines;
+        let pre = opened.matches.as_deref();
         if self.is_tracking_context {
-            self.pmif_context(&mut lines, &filename, &display_filename, max_count)
+            self.pmif_context(&mut lines, pre, &filename, &display_filename, max_count)
         } else if self.s.passthru {
-            self.pmif_passthru(&mut lines, &filename, &display_filename, max_count)
+            self.pmif_passthru(&mut lines, pre, &filename, &display_filename, max_count)
         } else if self.s.v {
-            self.pmif_opt_v(&mut lines, &filename, &display_filename, max_count)
+            self.pmif_opt_v(&mut lines, pre, &filename, &display_filename, max_count)
         } else {
-            self.pmif_normal(&mut lines, &filename, &display_filename, max_count)
+            self.pmif_normal(&mut lines, pre, &filename, &display_filename, max_count)
+        }
+    }
+
+    /// The first match in line `lineno`, from the worker's table if there is one.
+    fn line_match(&self, pre: Option<&[u32]>, lineno: u64, line: &[u8]) -> Option<usize> {
+        match pre {
+            Some(table) => match table.get(lineno as usize - 1) {
+                Some(0) | None => None,
+                Some(&start) => Some(start as usize - 1),
+            },
+            None => self.s.matches(line),
         }
     }
 
@@ -521,11 +706,12 @@ impl Searcher {
     fn pmif_context(
         &mut self,
         lines: &mut Lines,
+        pre: Option<&[u32]>,
         filename: &[u8],
         display: &[u8],
         mut max_count: i64,
     ) -> u64 {
-        let mut in_range = self.range_setup();
+        let mut in_range = self.s.range_setup();
         let mut has_printed_from_this_file = false;
         let mut nmatches = 0;
         self.after_context_pending = 0;
@@ -534,10 +720,10 @@ impl Searcher {
         while lines.next_line(&mut line) {
             lineno += 1;
             self.match_colno = None;
-            in_range = self.range_starts(in_range, &line);
+            in_range = self.s.range_starts(in_range, &line);
             let mut does_match = false;
             if in_range {
-                let m = self.matches(&line);
+                let m = self.line_match(pre, lineno, &line);
                 does_match = m.is_some() != self.s.v;
                 if !self.s.v
                     && let Some(start) = m
@@ -554,16 +740,16 @@ impl Searcher {
                 max_count -= 1;
             } else if self.after_context_pending > 0 {
                 // No column for context lines, since they have no matches.
-                let column = std::mem::replace(&mut self.s.column, false);
+                let column = std::mem::replace(&mut self.column, false);
                 self.print_line_with_options(Some(filename), &line, lineno, b"-", false);
-                self.s.column = column;
+                self.column = column;
                 self.after_context_pending -= 1;
-            } else if self.s.b > 0 {
+            } else if self.b > 0 {
                 // Save the line for "before" context.
                 self.before_context_buf[self.before_context_pos] = Some(line.clone());
-                self.before_context_pos = (self.before_context_pos + 1) % self.s.b;
+                self.before_context_pos = (self.before_context_pos + 1) % self.b;
             }
-            in_range = self.range_ends(in_range, &line);
+            in_range = self.s.range_ends(in_range, &line);
             if max_count == 0 && self.after_context_pending == 0 {
                 break;
             }
@@ -574,20 +760,21 @@ impl Searcher {
     fn pmif_passthru(
         &mut self,
         lines: &mut Lines,
+        pre: Option<&[u32]>,
         filename: &[u8],
         display: &[u8],
         mut max_count: i64,
     ) -> u64 {
-        let mut in_range = self.range_setup();
+        let mut in_range = self.s.range_setup();
         let mut has_printed_from_this_file = false;
         let mut nmatches = 0;
         let mut line = Vec::new();
         let mut lineno = 0u64;
         while lines.next_line(&mut line) {
             lineno += 1;
-            in_range = self.range_starts(in_range, &line);
+            in_range = self.s.range_starts(in_range, &line);
             self.match_colno = None;
-            let m = self.matches(&line);
+            let m = self.line_match(pre, lineno, &line);
             if in_range && let Some(start) = m {
                 self.match_colno = Some(start + 1);
                 if !has_printed_from_this_file {
@@ -609,7 +796,7 @@ impl Searcher {
                 self.print_line_with_options(Some(filename), &line, lineno, b"-", true);
                 has_printed_from_this_file = true;
             }
-            in_range = self.range_ends(in_range, &line);
+            in_range = self.s.range_ends(in_range, &line);
             if max_count == 0 {
                 break;
             }
@@ -620,11 +807,12 @@ impl Searcher {
     fn pmif_opt_v(
         &mut self,
         lines: &mut Lines,
+        pre: Option<&[u32]>,
         filename: &[u8],
         display: &[u8],
         mut max_count: i64,
     ) -> u64 {
-        let mut in_range = self.range_setup();
+        let mut in_range = self.s.range_setup();
         let mut has_printed_from_this_file = false;
         let mut nmatches = 0;
         self.match_colno = None;
@@ -632,8 +820,8 @@ impl Searcher {
         let mut lineno = 0u64;
         while lines.next_line(&mut line) {
             lineno += 1;
-            in_range = self.range_starts(in_range, &line);
-            if in_range && self.matches(&line).is_none() {
+            in_range = self.s.range_starts(in_range, &line);
+            if in_range && self.line_match(pre, lineno, &line).is_none() {
                 if !has_printed_from_this_file {
                     if self.s.break_ && self.has_printed_from_any_file {
                         self.print_blank_line();
@@ -647,7 +835,7 @@ impl Searcher {
                 nmatches += 1;
                 max_count -= 1;
             }
-            in_range = self.range_ends(in_range, &line);
+            in_range = self.s.range_ends(in_range, &line);
             if max_count == 0 {
                 break;
             }
@@ -658,11 +846,12 @@ impl Searcher {
     fn pmif_normal(
         &mut self,
         lines: &mut Lines,
+        pre: Option<&[u32]>,
         filename: &[u8],
         display: &[u8],
         mut max_count: i64,
     ) -> u64 {
-        let mut in_range = self.range_setup();
+        let mut in_range = self.s.range_setup();
         let mut has_printed_from_this_file = false;
         let mut nmatches = 0;
         let mut last_match_lineno: Option<u64> = None;
@@ -670,10 +859,10 @@ impl Searcher {
         let mut lineno = 0u64;
         while lines.next_line(&mut line) {
             lineno += 1;
-            in_range = self.range_starts(in_range, &line);
+            in_range = self.s.range_starts(in_range, &line);
             if in_range {
                 self.match_colno = None;
-                if let Some(start) = self.matches(&line) {
+                if let Some(start) = self.line_match(pre, lineno, &line) {
                     self.match_colno = Some(start + 1);
                     self.start_file_output(has_printed_from_this_file, display);
                     if let Some(p) = self.s.p.filter(|p| *p != 0) {
@@ -699,7 +888,7 @@ impl Searcher {
                     last_match_lineno = Some(lineno);
                 }
             }
-            in_range = self.range_ends(in_range, &line);
+            in_range = self.s.range_ends(in_range, &line);
             if max_count == 0 {
                 break;
             }
@@ -735,7 +924,7 @@ impl Searcher {
                 parts.push(disp_filename);
             }
             parts.push(disp_lineno);
-            if self.s.column {
+            if self.column {
                 let colno = self
                     .match_colno
                     .map(|c| c.to_string().into_bytes())
@@ -817,7 +1006,7 @@ impl Searcher {
                         n += self.s.color_filename.overhead();
                     }
                     n += self.s.color_lineno.overhead();
-                    if self.s.column {
+                    if self.column {
                         n += self.s.color_colno.overhead();
                     }
                 }
@@ -835,8 +1024,8 @@ impl Searcher {
 
     fn print_line_with_context(&mut self, filename: &[u8], matching_line: &[u8], lineno: u64) {
         let matching_line = strip_line_ending(matching_line).to_vec();
-        let nb = self.s.b;
-        if self.s.a > 0 || nb > 0 {
+        let nb = self.b;
+        if self.a > 0 || nb > 0 {
             let mut before_unprinted = lineno as i64 - self.printed_lineno as i64 - 1;
             if !self.is_first_match && (self.printed_lineno == 0 || before_unprinted > nb as i64) {
                 self.say(&[b"--"]);
@@ -849,7 +1038,7 @@ impl Searcher {
                 let idx =
                     (self.before_context_pos as i64 - before_unprinted + nb as i64) as usize % nb;
                 let line = self.before_context_buf[idx].clone().unwrap_or_default();
-                let column = std::mem::replace(&mut self.s.column, false);
+                let column = std::mem::replace(&mut self.column, false);
                 self.print_line_with_options(
                     Some(filename),
                     &line,
@@ -857,13 +1046,13 @@ impl Searcher {
                     b"-",
                     false,
                 );
-                self.s.column = column;
+                self.column = column;
                 before_unprinted -= 1;
             }
         }
         self.print_line_with_options(Some(filename), &matching_line, lineno, b":", false);
         // We want to get the next $n_after_ctx_lines printed.
-        self.after_context_pending = self.s.a;
+        self.after_context_pending = self.a;
         self.is_first_match = false;
     }
 }
