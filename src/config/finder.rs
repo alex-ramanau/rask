@@ -20,14 +20,39 @@ fn is_file(path: &[u8]) -> bool {
         .unwrap_or(false)
 }
 
-/// `_check_for_ackrc`: the `.ackrc` or `_ackrc` in `dir`. Dies if both exist.
-fn check_for_ackrc(dir: &[u8]) -> Option<Bytes> {
+/// The directory separator `File::Spec` joins with.
+const SEP: u8 = if cfg!(windows) { b'\\' } else { b'/' };
+
+fn is_sep(c: u8) -> bool {
+    c == b'/' || (cfg!(windows) && c == b'\\')
+}
+
+/// `File::Spec->catdir( $dir )`: Unix canonpath, or on Windows the path
+/// with forward slashes turned into backslashes and a trailing one removed
+/// (except after a drive letter).
+fn catdir(dir: &[u8]) -> Bytes {
+    if !cfg!(windows) {
+        return canonpath(dir);
+    }
+    let mut p: Bytes = dir
+        .iter()
+        .map(|&c| if c == b'/' { b'\\' } else { c })
+        .collect();
+    while p.len() > 1 && p.ends_with(b"\\") && !p.ends_with(b":\\") {
+        p.pop();
+    }
+    p
+}
+
+/// `_check_for_ackrc`: the `.ackrc` or `_ackrc` in `dir`. `Err` (the
+/// message for `App::Ack::die`) if both exist.
+fn check_for_ackrc(dir: &[u8]) -> Result<Option<Bytes>, String> {
     let files: Vec<Bytes> = [&b".ackrc"[..], b"_ackrc"]
         .iter()
         .map(|name| {
-            let mut p = canonpath(dir);
-            if !p.ends_with(b"/") {
-                p.push(b'/');
+            let mut p = catdir(dir);
+            if !p.last().is_some_and(|&c| is_sep(c)) {
+                p.push(SEP);
             }
             p.extend_from_slice(name);
             p
@@ -35,12 +60,12 @@ fn check_for_ackrc(dir: &[u8]) -> Option<Bytes> {
         .filter(|p| is_file(p))
         .collect();
     if files.len() > 1 {
-        crate::output::die(&format!(
+        return Err(format!(
             "{} contains both .ackrc and _ackrc. Please remove one of those files.",
-            lossy(&canonpath(dir))
+            lossy(&catdir(dir))
         ));
     }
-    files.into_iter().next()
+    Ok(files.into_iter().next())
 }
 
 /// On Unix, files are the same if they have the same inode.
@@ -74,7 +99,17 @@ fn remove_redundancies(configs: Vec<ConfigFile>) -> Vec<ConfigFile> {
         .collect()
 }
 
+/// `find_config_files`, from the current directory. Dies on an error.
 pub fn find_config_files() -> Vec<ConfigFile> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Vec::new();
+    };
+    find_config_files_from(&cwd).unwrap_or_else(|e| crate::output::die(&e))
+}
+
+/// `find_config_files` as if the current directory were `cwd`. `Err` is the
+/// message for `App::Ack::die`.
+pub fn find_config_files_from(cwd: &std::path::Path) -> Result<Vec<ConfigFile>, String> {
     let mut configs = Vec::new();
     if cfg!(windows) {
         for var in ["ProgramData", "APPDATA"] {
@@ -100,8 +135,8 @@ pub fn find_config_files() -> Vec<ConfigFile> {
             project: false,
         }),
         None => {
-            if let Some(home) = std::env::var_os("HOME").map(|h| from_os(&h))
-                && let Some(f) = check_for_ackrc(&home)
+            if let Some(home) = crate::env::var("HOME")
+                && let Some(f) = check_for_ackrc(&home)?
             {
                 configs.push(ConfigFile {
                     path: f,
@@ -111,16 +146,13 @@ pub fn find_config_files() -> Vec<ConfigFile> {
         }
     }
 
-    let Ok(cwd) = std::env::current_dir() else {
-        return Vec::new();
-    };
-    // File::Spec->splitdir, then look in each directory from cwd up to /.
-    let cwd = path_bytes(&cwd);
-    let mut dirs: Vec<&[u8]> = cwd.split(|&c| c == b'/').collect();
+    // File::Spec->splitdir, then look in each directory from cwd up to the root.
+    let cwd = path_bytes(cwd);
+    let mut dirs: Vec<&[u8]> = cwd.split(|&c| is_sep(c)).collect();
     while !dirs.is_empty() {
-        let dir = dirs.join(&b"/"[..]);
-        let dir = if dir.is_empty() { b"/".to_vec() } else { dir };
-        if let Some(f) = check_for_ackrc(&dir) {
+        let dir = dirs.join(&[SEP][..]);
+        let dir = if dir.is_empty() { vec![SEP] } else { dir };
+        if let Some(f) = check_for_ackrc(&dir)? {
             configs.push(ConfigFile {
                 path: f,
                 project: true,
@@ -129,5 +161,5 @@ pub fn find_config_files() -> Vec<ConfigFile> {
         }
         dirs.pop();
     }
-    remove_redundancies(configs)
+    Ok(remove_redundancies(configs))
 }

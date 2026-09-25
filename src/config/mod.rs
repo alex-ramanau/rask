@@ -5,7 +5,7 @@
 //! and the command line. Each source is run through several Getopt::Long
 //! passes with different configurations, in the same order as Perl ack.
 
-mod finder;
+pub mod finder;
 mod mutex;
 
 use std::cell::RefCell;
@@ -537,7 +537,7 @@ fn handle(
         Pager => {
             let v = v.into_bytes();
             opt.pager = if v.is_empty() || v == b"0" {
-                std::env::var_os("PAGER").map(|p| crate::bytes::from_os(&p))
+                crate::env::var("PAGER")
             } else {
                 Some(v)
             };
