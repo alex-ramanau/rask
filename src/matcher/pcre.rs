@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use pcre2::bytes::{Regex, RegexBuilder};
 
 use super::{Error, Match, Matcher, pattern_to_pcre};
@@ -6,6 +8,11 @@ use super::{Error, Match, Matcher, pattern_to_pcre};
 /// strings read from a file without an encoding layer.
 pub struct PcreMatcher {
     re: Regex,
+    pattern: String,
+    /// Same pattern without JIT, built on first use. The JIT has a small
+    /// fixed stack and errors out on long subjects (e.g. `(a|b)*` over a
+    /// 5 KB line); the interpreter keeps its frames on the heap and copes.
+    interp: OnceLock<Option<Regex>>,
 }
 
 impl PcreMatcher {
@@ -14,7 +21,17 @@ impl PcreMatcher {
             .jit_if_available(true)
             .build(pattern)
             .map_err(|e| Error(e.to_string()))?;
-        Ok(Self { re })
+        Ok(Self {
+            re,
+            pattern: pattern.to_string(),
+            interp: OnceLock::new(),
+        })
+    }
+
+    fn interp(&self) -> Option<&Regex> {
+        self.interp
+            .get_or_init(|| RegexBuilder::new().build(&self.pattern).ok())
+            .as_ref()
     }
 
     pub fn from_bytes(pattern: &[u8]) -> Result<Self, Error> {
@@ -25,7 +42,14 @@ impl PcreMatcher {
     /// the whole match, and groups that didn't participate are `None`.
     pub fn captures_at(&self, haystack: &[u8], start: usize) -> Vec<Option<(usize, usize)>> {
         let mut locs = self.re.capture_locations();
-        match self.re.captures_read_at(&mut locs, haystack, start) {
+        let mut res = self.re.captures_read_at(&mut locs, haystack, start);
+        if res.is_err()
+            && let Some(re) = self.interp()
+        {
+            locs = re.capture_locations();
+            res = re.captures_read_at(&mut locs, haystack, start);
+        }
+        match res {
             Ok(Some(_)) => (0..locs.len()).map(|i| locs.get(i)).collect(),
             _ => Vec::new(),
         }
@@ -39,10 +63,15 @@ impl PcreMatcher {
 
 impl Matcher for PcreMatcher {
     fn find_at(&self, haystack: &[u8], start: usize) -> Option<Match> {
-        // A match error (e.g. hitting PCRE2's match limit) counts as no
-        // match: Perl's regex engine gives up in the same situations.
+        // On a JIT error (stack limit), retry on the interpreter. An error
+        // there too (match/heap limit) counts as no match: Perl's regex
+        // engine gives up in the same situations.
         self.re
             .find_at(haystack, start)
+            .or_else(|_| match self.interp() {
+                Some(re) => re.find_at(haystack, start),
+                None => Ok(None),
+            })
             .ok()
             .flatten()
             .map(|m| Match {
@@ -79,6 +108,15 @@ mod tests {
     fn rejects_code_blocks() {
         // Perl's (?{ code }) must never run (t/no-re-eval.t). PCRE2 doesn't support it.
         assert!(PcreMatcher::new(r#"(?{print "hi"})x"#).is_err());
+    }
+
+    #[test]
+    fn long_line_past_jit_stack() {
+        // Regression: the default JIT stack gave up here and reported no match.
+        let line = vec![b'a'; 200_000];
+        let m = PcreMatcher::new("^(?:a|b)*$").unwrap();
+        assert!(m.is_match(&line));
+        assert_eq!(m.captures_at(&line, 0).len(), 1);
     }
 
     #[test]
