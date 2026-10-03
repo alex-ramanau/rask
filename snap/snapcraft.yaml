@@ -12,7 +12,7 @@ description: |
   The command is `rask`. To run it as `ack`, add an alias:
 
       sudo snap alias rask ack
-license: Artistic-2.0
+license: GPL-3.0-or-later
 website: https://github.com/alex-ramanau/rask
 source-code: https://github.com/alex-ramanau/rask
 issues: https://github.com/alex-ramanau/rask/issues

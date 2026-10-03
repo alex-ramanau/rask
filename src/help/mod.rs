@@ -14,13 +14,16 @@ pub fn show_help() {
     output::print(&[HELP.as_bytes()]);
 }
 
-/// `--version`. `t/ack-version.t` checks that the first line has the ack version.
+/// `--version`. `t/ack-version.t` checks that the first line has the ack version;
+/// the rest is rask's own copyright and licence.
 pub fn version_text() -> String {
     format!(
         "ack v{} (rask {})\n\n\
-         Copyright 2005-2026 Andy Lester.\n\n\
-         This program is free software.  You may modify or distribute it\n\
-         under the terms of the Artistic License v2.0.\n",
+         rask: Copyright 2026 Alex Ramanau.\n\
+         Based on ack, Copyright 2005-2026 Andy Lester.\n\n\
+         This program is free software: you can redistribute it and/or modify\n\
+         it under the terms of the GNU General Public License, version 3 or\n\
+         later. There is NO WARRANTY, to the extent permitted by law.\n",
         crate::ACK_VERSION,
         env!("CARGO_PKG_VERSION")
     )

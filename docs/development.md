@@ -89,4 +89,4 @@ The scripts honour `CARGO_TARGET_DIR`.
 
 ## Licence
 
-Artistic License 2.0, like ack.
+GPL v3 or later; see [LICENSE](../LICENSE) and the [README](../README.md#licence).

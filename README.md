@@ -50,6 +50,14 @@ sudo snap install rask --classic
 Until then, build from source (below), or build the snap yourself with
 `make snap` (see [docs/snap.md](docs/snap.md)).
 
+The snap uses classic confinement, which is why it needs `--classic`. A
+search tool has to read whatever you point it at, and a strictly confined
+snap can't: it can't see `~/.ackrc` or other dotfiles at the top of your home
+directory, sees the base snap's `/usr` instead of your system's (so
+`rask foo /usr/include` would search the wrong headers), and can't read
+outside your home directory and removable media at all, `/tmp` included.
+ripgrep's snap is classic for the same reasons.
+
 The snap command is `rask`. To run it as `ack` too:
 
 ```sh
@@ -272,4 +280,12 @@ how to build it, and how to run ack's test suite against rask.
 
 ## Licence
 
-Artistic License 2.0, the same as ack. ack is copyright 2005–2026 Andy Lester.
+rask is free software, licensed under the
+[GNU General Public License, version 3](LICENSE) or (at your option) any
+later version.
+
+rask is based on ack, copyright 2005–2026 Andy Lester, which is distributed
+under the [Artistic License 2.0](https://opensource.org/license/artistic-2-0).
+The text rask embeds from ack (its `--help` output, manual and default
+ackrc) keeps Andy Lester's copyright. The Artistic License 2.0 allows a
+modified version to be distributed under the GPL (section 4(c)(ii)).
