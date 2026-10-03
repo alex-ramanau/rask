@@ -1,0 +1,63 @@
+name: rask
+title: rask
+base: core24
+adopt-info: rask
+summary: ack, the grep-like source code search tool, in Rust
+description: |
+  rask is a reimplementation of ack 3 (https://beyondgrep.com/) in Rust.
+  It behaves like ack 3.10.0: the same options, output, exit codes and
+  .ackrc handling. It passes ack's own test suite and searches about eight
+  times faster.
+
+  The command is `rask`. To run it as `ack`, add an alias:
+
+      sudo snap alias rask ack
+license: Artistic-2.0
+website: https://github.com/alex-ramanau/rask
+source-code: https://github.com/alex-ramanau/rask
+issues: https://github.com/alex-ramanau/rask/issues
+contact: https://github.com/alex-ramanau/rask/issues
+grade: stable
+
+# A search tool has to read whatever files and directories it's pointed at,
+# including dotfiles such as ~/.ackrc and system paths such as /etc/ackrc and
+# /usr/include. Strict confinement can't allow that, so the snap is classic.
+# Classic confinement needs approval from the Snap Store reviewers.
+confinement: classic
+
+# One native build per architecture. The binary is statically linked (musl),
+# so the same snap runs on every Ubuntu LTS release (and any other distro
+# with snapd), whatever the base.
+platforms:
+  amd64:
+  arm64:
+
+apps:
+  rask:
+    command: bin/rask
+
+parts:
+  rask:
+    plugin: nil
+    source: .
+    build-snaps:
+      - rustup
+    build-packages:
+      # musl-gcc, for PCRE2's C code in a static build.
+      - musl-tools
+    override-pull: |
+      craftctl default
+      craftctl set version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+    override-build: |
+      # x86_64-unknown-linux-musl or aarch64-unknown-linux-musl.
+      TARGET="$(uname -m)-unknown-linux-musl"
+      # Install the stable toolchain only if there isn't one: a local
+      # --destructive-mode build shouldn't update the host's toolchain.
+      if ! rustup run stable rustc --version >/dev/null 2>&1; then
+        rustup toolchain install stable --profile minimal
+      fi
+      rustup target add --toolchain stable "$TARGET"
+      # PCRE2 is always built from its bundled source and linked statically
+      # (.cargo/config.toml sets PCRE2_SYS_STATIC=1).
+      cargo +stable build --release --locked -p rask --target "$TARGET" --target-dir target
+      install -Dm755 "target/$TARGET/release/rask" "$CRAFT_PART_INSTALL/bin/rask"

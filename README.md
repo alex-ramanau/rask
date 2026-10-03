@@ -17,6 +17,7 @@ see `rust-skip.txt`). Known gaps are listed in the plan
 | `src/` | the `rask` binary; one module per area (`cli`, `config`, `walk`, `filter`, `matcher`, `search`, `output`, `help`) |
 | `scripts/ack-suite` | runs ack3's own test suite against the rask binary and reports pass counts |
 | `scripts/diff-ack`, `tests/diff/` | runs Perl ack and rask on the same command lines and compares stdout, stderr and exit code |
+| `snap/snapcraft.yaml`, `docs/snap.md` | the snap (static binary, classic, amd64 + arm64) and how to publish it |
 | `scripts/bench` | benchmarks against Perl ack and `grep -r`, checking the output is identical first |
 | `scripts/texttest-vs-perl` | property test: the port of Perl's `-T` against Perl, on thousands of random files |
 | `tests/ack3_filters.rs` | Rust ports of ack3's Perl-internals filter and iterator tests (need `ACK3_DIR`) |

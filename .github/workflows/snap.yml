@@ -1,0 +1,48 @@
+name: Snap
+
+# Builds the snap natively on amd64 and arm64. Pushing a tag like v0.1.0
+# also uploads both builds to the Snap Store's edge channel, once the
+# SNAPCRAFT_STORE_CREDENTIALS secret is set (see docs/snap.md).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths: ['snap/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/snap.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: snap (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: snapcore/action-build@v1
+        id: build
+      - name: Smoke test
+        run: |
+          sudo snap install --dangerous --classic ${{ steps.build.outputs.snap }}
+          rask --version
+          printf 'hello\nworld\n' > /tmp/rask-smoke.txt
+          test "$(rask --noenv world /tmp/rask-smoke.txt)" = world
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rask-snap-${{ matrix.arch }}
+          path: ${{ steps.build.outputs.snap }}
+      - name: Upload to the Snap Store (edge)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: snapcore/action-publish@v1
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+        with:
+          snap: ${{ steps.build.outputs.snap }}
+          release: edge

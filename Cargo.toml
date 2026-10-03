@@ -5,7 +5,7 @@ members = [".", "tools/regex-spike"]
 edition = "2024"
 rust-version = "1.85"
 license = "Artistic-2.0"
-repository = "https://github.com/CHANGEME/rask"
+repository = "https://github.com/alex-ramanau/rask"
 
 [workspace.dependencies]
 pcre2 = "0.2.11"
@@ -27,6 +27,11 @@ path = "src/main.rs"
 
 [dependencies]
 pcre2.workspace = true
+
+# musl's allocator is slow with several threads (twice the run time in
+# docs/benchmarks.md scenarios), so static musl builds (the snap) use mimalloc.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process"] }
