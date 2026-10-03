@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 use std::io::IsTerminal;
+use std::sync::Arc;
 
 use crate::bytes::{Bytes, from_os, lossy, to_path};
 use crate::cli::getopt::{self, Config, Spec};
@@ -11,7 +12,7 @@ use crate::matcher::PcreMatcher;
 use crate::matcher::build::{RegexOpts, build_all_regexes, build_regex};
 use crate::output::color::Color;
 use crate::output::die;
-use crate::search::{OutputTemplate, Searcher, Settings};
+use crate::search::{Mode, OutputTemplate, Searcher, Settings};
 
 fn compile(qr: &[u8]) -> PcreMatcher {
     PcreMatcher::from_bytes(qr)
@@ -275,18 +276,25 @@ pub fn run() -> ! {
     let debug = opt.debug;
     let opt_pager = opt.pager.clone();
 
-    let warn_handler = |msg: &str| {
+    let warn_handler = move |msg: &str| {
         if report_bad_filenames {
             crate::output::warn(msg);
         }
     };
 
-    // Set up the file stream.
-    let mut files: Box<dyn Iterator<Item = Bytes>> = if use_stdin {
-        Box::new(std::iter::once(b"-".to_vec()))
+    // Set up the file stream: a list of files, or a directory walk.
+    enum Input {
+        Files(Box<dyn Iterator<Item = File>>),
+        Walk {
+            make_walker: Box<dyn FnOnce() -> crate::walk::Files<'static> + Send>,
+            selector: Selector,
+        },
+    }
+    let input = if use_stdin {
+        Input::Files(Box::new(std::iter::once(File::new(b"-".to_vec()))))
     } else if let Some(from) = &opt.files_from {
         match crate::walk::from_file(from, Box::new(warn_handler)) {
-            Ok(f) => Box::new(f),
+            Ok(f) => Input::Files(Box::new(f)),
             Err(msg) => {
                 warn_handler(&msg);
                 crate::output::exit(1);
@@ -305,8 +313,8 @@ pub fn run() -> ! {
             }
         }
         let opt = std::mem::take(&mut opt);
-        let descend_filter = compile_descend_filter(&opt.idirs, report_bad_filenames);
-        let file_filter = compile_file_filter(
+        let idirs = opt.idirs.clone();
+        let selector = file_selector(
             FilterOpts {
                 filters: opt.filters,
                 ifiles: opt.ifiles,
@@ -318,38 +326,91 @@ pub fn run() -> ! {
             opt.v,
             report_bad_filenames,
         );
-        let descend_filter = if opt.n {
-            Some(Box::new(|_: &[u8]| false) as crate::walk::DescendFilter)
-        } else {
-            descend_filter
+        let (no_recurse, sort_files, follow_symlinks) = (opt.n, opt.sort_files, opt.follow);
+        let starts = start.clone();
+        let make_walker = move || {
+            let descend_filter = if no_recurse {
+                Some(Box::new(|_: &[u8]| false) as crate::walk::DescendFilter)
+            } else {
+                compile_descend_filter(&idirs, report_bad_filenames)
+            };
+            let warn = move |msg: &str| {
+                if report_bad_filenames {
+                    crate::output::warn(msg);
+                }
+            };
+            crate::walk::Files::new(
+                crate::walk::WalkOptions {
+                    file_filter: None,
+                    descend_filter,
+                    error_handler: Box::new(warn),
+                    sort_files,
+                    follow_symlinks,
+                },
+                &starts,
+            )
         };
-        Box::new(crate::walk::Files::new(
-            crate::walk::WalkOptions {
-                file_filter: Some(file_filter),
-                descend_filter,
-                error_handler: Box::new(warn_handler),
-                sort_files: opt.sort_files,
-                follow_symlinks: opt.follow,
-            },
-            &start,
-        ))
+        Input::Walk {
+            make_walker: Box::new(make_walker),
+            selector,
+        }
     };
 
     if let Some(pager) = &opt_pager {
         crate::output::set_up_pager(pager);
     }
 
-    let mut searcher = Searcher::new(settings);
-    let nmatches = if searcher.s.f || searcher.s.g {
-        searcher.file_loop_fg(&mut files)
-    } else if searcher.s.c {
-        searcher.file_loop_c(&mut files)
-    } else if searcher.s.l || searcher.s.big_l {
-        searcher.file_loop_l(&mut files)
+    let settings = Arc::new(settings);
+    let mode = if settings.f || settings.g {
+        Mode::List
+    } else if settings.c {
+        Mode::Count { bail: false }
+    } else if settings.l || settings.big_l {
+        Mode::Count { bail: true }
     } else {
-        searcher.file_loop_normal(&mut files)
+        Mode::Search
     };
-    drop(files);
+    let threads = crate::parallel::threads();
+    let mut prepared: Box<dyn Iterator<Item = crate::search::Prepared>> = match input {
+        Input::Walk {
+            make_walker,
+            selector,
+        } if threads > 1 => Box::new(crate::parallel::run(
+            make_walker,
+            selector,
+            settings.clone(),
+            mode,
+            threads,
+        )),
+        Input::Walk {
+            make_walker,
+            mut selector,
+        } => {
+            use crate::parallel::Select;
+            let mut walker = make_walker();
+            let settings = settings.clone();
+            Box::new(std::iter::from_fn(move || {
+                loop {
+                    let entry = walker.next_entry()?;
+                    if let Some(file) = selector.select(&entry) {
+                        return Some(settings.prepare(file.regular(entry.is_file), mode));
+                    }
+                }
+            }))
+        }
+        Input::Files(files) => {
+            let settings = settings.clone();
+            Box::new(files.map(move |f| settings.prepare(f, mode)))
+        }
+    };
+    let mut searcher = Searcher::new(settings);
+    let nmatches = match mode {
+        Mode::List => searcher.file_loop_fg(&mut prepared),
+        Mode::Count { bail: false } => searcher.file_loop_c(&mut prepared),
+        Mode::Count { bail: true } => searcher.file_loop_l(&mut prepared),
+        Mode::Search => searcher.file_loop_normal(&mut prepared),
+    };
+    drop(prepared);
 
     if debug {
         let show = |q: Option<&Bytes>| q.map(|q| lossy(q)).unwrap_or_else(|| "undef".into());
@@ -380,10 +441,10 @@ struct FilterOpts {
 }
 
 /// `_compile_descend_filter`
-fn compile_descend_filter<'a>(
+fn compile_descend_filter(
     idirs: &[crate::config::IgnoreDir],
     report_bad_filenames: bool,
-) -> Option<crate::walk::DescendFilter<'a>> {
+) -> Option<crate::walk::DescendFilter<'static>> {
     // With any --noignore-dir, whole hierarchies can't be skipped; the file
     // filter looks at each file's directories instead.
     if idirs.iter().any(|d| d.inverted) || idirs.is_empty() {
@@ -395,19 +456,134 @@ fn compile_descend_filter<'a>(
     };
     Some(Box::new(move |dir: &[u8]| {
         let file = File::new(dir.to_vec());
-        !collections.iter().any(|c| c.borrow().matches(&file, &ctx))
+        !collections
+            .iter()
+            .any(|c| c.lock().unwrap().matches(&file, &ctx))
     }))
 }
 
+/// The file filter (`_compile_file_filter`): which walked files are searched.
+struct SelectorData {
+    ctx: FilterContext,
+    direct: Collection,
+    inverse: Collection,
+    has_inverse: bool,
+    starting_set: HashSet<Bytes>,
+    starts_include_files: bool,
+    dont_ignore_dir_filter: bool,
+    idirs: Vec<crate::config::IgnoreDir>,
+    ifiles: Option<Collection>,
+    g_match: Option<PcreMatcher>,
+    g_not: Option<PcreMatcher>,
+    opt_v: bool,
+}
+
+/// The file filter, with the per-thread cache of the last directory's
+/// `--noignore-dir` result.
+#[derive(Clone)]
+struct Selector {
+    data: Arc<SelectorData>,
+    previous_dir: Bytes,
+    previous_dir_ignore_result: bool,
+}
+
+impl crate::parallel::Select for Selector {
+    fn select(&mut self, entry: &crate::walk::Entry) -> Option<File> {
+        let d = self.data.clone();
+        use crate::matcher::Matcher;
+        let name = &entry.fullpath;
+        if let Some(g) = &d.g_match {
+            let mut is_match = g.is_match(name);
+            if is_match && let Some(not) = &d.g_not {
+                is_match = !not.is_match(name);
+            }
+            if is_match == d.opt_v {
+                return None;
+            }
+        }
+        // ack always selects files that are specified on the command line,
+        // regardless of filetype.
+        if d.starts_include_files && d.starting_set.contains(&get_file_id(name)) {
+            return Some(File::new(name.clone()));
+        }
+
+        if d.dont_ignore_dir_filter {
+            let dir = entry.dirname.clone().unwrap_or_default();
+            if self.previous_dir == dir {
+                if self.previous_dir_ignore_result {
+                    return None;
+                }
+            } else {
+                let dirs = splitdir(&dir);
+                let mut is_ignoring = false;
+                for i in 0..dirs.len() {
+                    let prefix = dirs[..=i].join(&b"/"[..]);
+                    let dir_file = File::new(crate::walk::canonpath(&prefix));
+                    for idir in &d.idirs {
+                        if idir.collection.lock().unwrap().matches(&dir_file, &d.ctx) {
+                            is_ignoring = !idir.inverted;
+                        }
+                    }
+                }
+                self.previous_dir = dir;
+                self.previous_dir_ignore_result = is_ignoring;
+                if is_ignoring {
+                    return None;
+                }
+            }
+        }
+
+        // Ignore named pipes found in directory searching.
+        if entry.is_named_pipe {
+            return None;
+        }
+        // We can't handle unreadable filenames; report them. Perl checks the
+        // mode bits (-r _) and then access(2) (-R); a file that opens is
+        // readable by both, so they're only consulted when the open fails.
+        // The open handle is kept for the -T test and the search.
+        let path = to_path(name);
+        let file = match std::fs::File::open(&path) {
+            Ok(handle) => File::with_handle(name.clone(), handle),
+            Err(_) => {
+                let meta = std::fs::metadata(&path).ok();
+                if !crate::filetest::readable(meta.as_ref())
+                    && !crate::filetest::access_readable(&path)
+                {
+                    if d.ctx.report_bad_filenames {
+                        crate::output::warn(&format!(
+                            "{}: cannot open file for reading",
+                            lossy(name)
+                        ));
+                    }
+                    return None;
+                }
+                File::new(name.clone())
+            }
+        };
+
+        if let Some(ifiles) = &d.ifiles
+            && ifiles.matches(&file, &d.ctx)
+        {
+            return None;
+        }
+        let mut match_found = d.direct.matches(&file, &d.ctx);
+        // Don't bother invoking inverse filters unless we consider the current file a match.
+        if match_found && d.has_inverse && d.inverse.matches(&file, &d.ctx) {
+            match_found = false;
+        }
+        match_found.then_some(file)
+    }
+}
+
 /// `_compile_file_filter`
-fn compile_file_filter<'a>(
+fn file_selector(
     fo: FilterOpts,
     start: &[Bytes],
     g_match: Option<Bytes>,
     g_not: Option<Bytes>,
     opt_v: bool,
     report_bad_filenames: bool,
-) -> crate::walk::FileFilter<'a> {
+) -> Selector {
     let ctx = FilterContext {
         report_bad_filenames,
     };
@@ -424,94 +600,30 @@ fn compile_file_filter<'a>(
         }
     }
     let starting_set: HashSet<Bytes> = start.iter().map(|s| get_file_id(s)).collect();
+    // A walked file can only be in the starting set if a start isn't a
+    // directory; otherwise the stat for its id can be skipped.
+    let starts_include_files = start.iter().any(|s| !to_path(s).is_dir());
     let dont_ignore_dir_filter = fo.idirs.iter().any(|d| d.inverted);
     let idirs = fo.idirs;
     let ifiles = fo.ifiles;
     let g_match = g_match.map(|q| compile(&q));
     let g_not = g_not.map(|q| compile(&q));
-    let mut previous_dir: Bytes = Vec::new();
-    let mut previous_dir_ignore_result = false;
-
-    Box::new(move |entry: &crate::walk::Entry| {
-        use crate::matcher::Matcher;
-        let name = &entry.fullpath;
-        if let Some(g) = &g_match {
-            let mut is_match = g.is_match(name);
-            if is_match && let Some(not) = &g_not {
-                is_match = !not.is_match(name);
-            }
-            if is_match == opt_v {
-                return false;
-            }
-        }
-        // ack always selects files that are specified on the command line,
-        // regardless of filetype.
-        if starting_set.contains(&get_file_id(name)) {
-            return true;
-        }
-
-        if dont_ignore_dir_filter {
-            let dir = entry.dirname.clone().unwrap_or_default();
-            if previous_dir == dir {
-                if previous_dir_ignore_result {
-                    return false;
-                }
-            } else {
-                let dirs = splitdir(&dir);
-                let mut is_ignoring = false;
-                for i in 0..dirs.len() {
-                    let prefix = dirs[..=i].join(&b"/"[..]);
-                    let dir_file = File::new(crate::walk::canonpath(&prefix));
-                    for d in &idirs {
-                        if d.collection.borrow().matches(&dir_file, &ctx) {
-                            is_ignoring = !d.inverted;
-                        }
-                    }
-                }
-                previous_dir = dir;
-                previous_dir_ignore_result = is_ignoring;
-                if is_ignoring {
-                    return false;
-                }
-            }
-        }
-
-        // Ignore named pipes found in directory searching.
-        let path = to_path(name);
-        let meta = std::fs::metadata(&path).ok();
-        if meta.as_ref().is_some_and(is_fifo) {
-            return false;
-        }
-        // We can't handle unreadable filenames; report them.
-        if !crate::filetest::readable(meta.as_ref()) && !crate::filetest::access_readable(&path) {
-            if report_bad_filenames {
-                crate::output::warn(&format!("{}: cannot open file for reading", lossy(name)));
-            }
-            return false;
-        }
-
-        let file = File::new(name.clone());
-        if let Some(ifiles) = &ifiles
-            && ifiles.matches(&file, &ctx)
-        {
-            return false;
-        }
-        let mut match_found = direct.matches(&file, &ctx);
-        // Don't bother invoking inverse filters unless we consider the current file a match.
-        if match_found && has_inverse && inverse.matches(&file, &ctx) {
-            match_found = false;
-        }
-        match_found
-    })
-}
-
-#[cfg(unix)]
-fn is_fifo(m: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::FileTypeExt;
-    m.file_type().is_fifo()
-}
-
-#[cfg(not(unix))]
-fn is_fifo(_: &std::fs::Metadata) -> bool {
-    false
+    Selector {
+        data: Arc::new(SelectorData {
+            ctx,
+            direct,
+            inverse,
+            has_inverse,
+            starting_set,
+            starts_include_files,
+            dont_ignore_dir_filter,
+            idirs,
+            ifiles,
+            g_match,
+            g_not,
+            opt_v,
+        }),
+        previous_dir: Vec::new(),
+        previous_dir_ignore_result: false,
+    }
 }

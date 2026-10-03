@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read};
 
 use crate::bytes::{Bytes, errno_text, from_os, lossy, to_path};
+use crate::filter::File;
 
 /// `File::Spec::Unix->canonpath`
 pub fn canonpath(path: &[u8]) -> Bytes {
@@ -99,19 +100,29 @@ pub fn reslash(path: &[u8]) -> Bytes {
 pub struct Entry {
     pub dirname: Option<Bytes>,
     pub fullpath: Bytes,
-    is_dir: bool,
-    is_file: bool,
+    pub is_dir: bool,
+    pub is_file: bool,
+    /// File::Next's `$is_fifo`, which also counts anything under `/dev/fd`.
     is_fifo: bool,
+    /// Really a named pipe (Perl's `-p`).
+    pub is_named_pipe: bool,
 }
 
-fn file_kind(meta: Option<fs::Metadata>, path: &[u8]) -> (bool, bool, bool) {
-    let dev_fd = path.starts_with(b"/dev/fd");
-    match meta {
-        Some(m) => {
-            let ft = m.file_type();
-            (ft.is_dir(), ft.is_file(), is_fifo(&ft) || dev_fd)
+impl Entry {
+    fn new(dirname: Option<Bytes>, fullpath: Bytes, ft: Option<fs::FileType>) -> Entry {
+        let dev_fd = fullpath.starts_with(b"/dev/fd");
+        let (is_dir, is_file, pipe) = match ft {
+            Some(ft) => (ft.is_dir(), ft.is_file(), is_fifo(&ft)),
+            None => (false, false, false),
+        };
+        Entry {
+            dirname,
+            fullpath,
+            is_dir,
+            is_file,
+            is_fifo: pipe || dev_fd,
+            is_named_pipe: pipe,
         }
-        None => (false, false, dev_fd),
     }
 }
 
@@ -126,7 +137,9 @@ fn is_fifo(_: &fs::FileType) -> bool {
     false
 }
 
-pub type FileFilter<'a> = Box<dyn FnMut(&Entry) -> bool + 'a>;
+/// Decides whether a file is selected. A selected file is returned as a
+/// `File`, which may carry the handle the filter opened.
+pub type FileFilter<'a> = Box<dyn FnMut(&Entry) -> Option<File> + 'a>;
 pub type DescendFilter<'a> = Box<dyn Fn(&[u8]) -> bool + 'a>;
 pub type ErrorHandler<'a> = Box<dyn Fn(&str) + 'a>;
 
@@ -150,15 +163,9 @@ impl<'a> Files<'a> {
             .iter()
             .map(|s| {
                 let start = reslash(s);
-                let (is_dir, is_file, is_fifo) =
-                    file_kind(fs::metadata(to_path(&start)).ok(), &start);
-                Entry {
-                    dirname: if is_dir { Some(start.clone()) } else { None },
-                    fullpath: start,
-                    is_dir,
-                    is_file,
-                    is_fifo,
-                }
+                let ft = fs::metadata(to_path(&start)).ok().map(|m| m.file_type());
+                let is_dir = ft.is_some_and(|ft| ft.is_dir());
+                Entry::new(is_dir.then(|| start.clone()), start, ft)
             })
             .collect();
         Files { opts, queue }
@@ -176,32 +183,27 @@ impl<'a> Files<'a> {
         for dent in reader.flatten() {
             let name = from_os(&dent.file_name());
             let fullpath = catdir(dirname, &name);
-            let path = to_path(&fullpath);
-            let meta = if self.opts.follow_symlinks {
-                fs::metadata(&path).ok()
-            } else {
-                match fs::symlink_metadata(&path) {
-                    Ok(m) if m.file_type().is_symlink() => continue,
-                    m => m.ok(),
+            // The type comes from readdir where the filesystem provides it,
+            // so most entries need no stat. Symlinks are skipped, or
+            // followed with a stat, as File::Next does.
+            let ft = match dent.file_type() {
+                Ok(ft) if ft.is_symlink() => {
+                    if !self.opts.follow_symlinks {
+                        continue;
+                    }
+                    fs::metadata(to_path(&fullpath)).ok().map(|m| m.file_type())
                 }
+                Ok(ft) => Some(ft),
+                Err(_) => None,
             };
-            let (is_dir, is_file, is_fifo) = file_kind(meta, &fullpath);
-            if is_dir
+            let entry = Entry::new(Some(dirname.to_vec()), fullpath, ft);
+            if entry.is_dir
                 && let Some(descend) = &self.opts.descend_filter
-                && !descend(&fullpath)
+                && !descend(&entry.fullpath)
             {
                 continue;
             }
-            entries.push((
-                name,
-                Entry {
-                    dirname: Some(dirname.to_vec()),
-                    fullpath,
-                    is_dir,
-                    is_file,
-                    is_fifo,
-                },
-            ));
+            entries.push((name, entry));
         }
         if self.opts.sort_files {
             entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -210,18 +212,12 @@ impl<'a> Files<'a> {
     }
 }
 
-impl Iterator for Files<'_> {
-    type Item = Bytes;
-
-    fn next(&mut self) -> Option<Bytes> {
+impl Files<'_> {
+    /// The next file or pipe in walk order, before the file filter.
+    pub fn next_entry(&mut self) -> Option<Entry> {
         while let Some(entry) = self.queue.pop_front() {
             if entry.is_file || entry.is_fifo {
-                if let Some(filter) = &mut self.opts.file_filter
-                    && !filter(&entry)
-                {
-                    continue;
-                }
-                return Some(entry.fullpath);
+                return Some(entry);
             }
             if entry.is_dir {
                 let children = self.candidate_files(&entry.fullpath);
@@ -229,6 +225,24 @@ impl Iterator for Files<'_> {
                     self.queue.push_front(child);
                 }
             }
+        }
+        None
+    }
+}
+
+impl Iterator for Files<'_> {
+    type Item = File;
+
+    fn next(&mut self) -> Option<File> {
+        while let Some(entry) = self.next_entry() {
+            let file = match &mut self.opts.file_filter {
+                Some(filter) => match filter(&entry) {
+                    Some(file) => file,
+                    None => continue,
+                },
+                None => File::new(entry.fullpath.clone()),
+            };
+            return Some(file.regular(entry.is_file));
         }
         None
     }
@@ -260,9 +274,9 @@ pub struct FromFile<'a> {
 }
 
 impl Iterator for FromFile<'_> {
-    type Item = Bytes;
+    type Item = File;
 
-    fn next(&mut self) -> Option<Bytes> {
+    fn next(&mut self) -> Option<File> {
         loop {
             let mut line = Vec::new();
             match self
@@ -281,12 +295,16 @@ impl Iterator for FromFile<'_> {
             if line.is_empty() {
                 continue;
             }
-            let (_, is_file, is_fifo) = file_kind(fs::metadata(to_path(&line)).ok(), b"");
+            let ft = fs::metadata(to_path(&line)).ok().map(|m| m.file_type());
+            let (is_file, is_fifo) = (
+                ft.is_some_and(|ft| ft.is_file()),
+                ft.is_some_and(|ft| is_fifo(&ft)),
+            );
             if !(is_file || is_fifo) {
                 (self.warn)(&format!("{}: No such file", lossy(&line)));
                 continue;
             }
-            return Some(line);
+            return Some(File::new(line).regular(is_file));
         }
     }
 }

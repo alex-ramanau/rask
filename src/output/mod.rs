@@ -68,11 +68,39 @@ pub fn warn(msg: &str) {
 }
 
 pub fn warn_bytes(msg: &[u8]) {
+    let line = [PROGRAM.as_bytes(), b": ", msg, b"\n"].concat();
+    let captured = CAPTURE.with(|c| match c.borrow_mut().as_mut() {
+        Some(buf) => {
+            buf.push(line.clone());
+            true
+        }
+        None => false,
+    });
+    if !captured {
+        emit_warnings(&[line]);
+    }
+}
+
+thread_local! {
+    /// Warnings recorded instead of printed, while a worker thread handles a file.
+    static CAPTURE: RefCell<Option<Vec<Vec<u8>>>> = const { RefCell::new(None) };
+}
+
+/// Runs `f`, returning the warnings it would have printed instead of
+/// printing them, so they can be printed later in the right order.
+pub fn capture_warnings<R>(f: impl FnOnce() -> R) -> (R, Vec<Vec<u8>>) {
+    let previous = CAPTURE.with(|c| c.replace(Some(Vec::new())));
+    let result = f();
+    let warnings = CAPTURE.with(|c| c.replace(previous)).unwrap_or_default();
+    (result, warnings)
+}
+
+/// Prints complete warning lines (as captured) to stderr.
+pub fn emit_warnings(lines: &[Vec<u8>]) {
     let mut err = io::stderr().lock();
-    let _ = err.write_all(PROGRAM.as_bytes());
-    let _ = err.write_all(b": ");
-    let _ = err.write_all(msg);
-    let _ = err.write_all(b"\n");
+    for line in lines {
+        let _ = err.write_all(line);
+    }
 }
 
 /// The text `App::Ack::die` passes to `CORE::die`, for use where Perl ack

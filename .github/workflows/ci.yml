@@ -90,4 +90,7 @@ jobs:
         run: |
           scripts/diff-ack --cases tests/diff/phase1.txt
           scripts/diff-ack --cases tests/diff/phase2.txt
+          scripts/diff-ack --cases tests/diff/phase5.txt
+          # The same, searching serially.
+          for cases in tests/diff/phase*.txt; do RASK_THREADS=1 scripts/diff-ack --cases "$cases"; done
           RASK=target/release/rask scripts/texttest-vs-perl 1 2 3

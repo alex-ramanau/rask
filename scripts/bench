@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Benchmarks rask against Perl ack (and grep -r for reference), plan item 5.1.
+
+    scripts/bench [--runs N] [--corpus NAME ...] [--markdown FILE]
+
+Each scenario runs once untimed to warm the page cache, then N timed runs;
+the median wall time is reported. Before timing, rask's stdout, stderr and
+exit code are compared with Perl ack's: a scenario whose output differs is
+reported as a failure, so a speed-up can never quietly change behaviour.
+
+Corpora are local directories (no downloads). Set ACK3_DIR for Perl ack
+(default ../ack3, needs blib/) and RASK for the binary (default: release).
+"""
+
+import argparse
+import os
+import statistics
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ACK3 = os.path.abspath(os.environ.get("ACK3_DIR", os.path.join(HERE, "..", "ack3")))
+TARGET = os.environ.get("CARGO_TARGET_DIR", os.path.join(HERE, "target"))
+RASK = os.path.abspath(os.environ.get("RASK", os.path.join(TARGET, "release", "rask")))
+
+CORPORA = {
+    # A large tree of real source code (Go modules): the "big repo" case.
+    "go": os.path.expanduser("~/go"),
+    # C headers: many medium-sized text files.
+    "include": "/usr/include",
+    # Lots of small files, many of them not text.
+    "share": "/usr/share",
+}
+
+SCENARIOS = [
+    ("literal", ["main"]),
+    ("literal -i", ["-i", "main"]),
+    ("no match", ["zzqqxnotfound"]),
+    ("alternation", [r"foo|bar|baz"]),
+    ("regex", [r"[A-Z][a-z]+Error"]),
+    ("-w", ["-w", "int"]),
+    ("-v -c", ["-v", "-c", "a"]),
+    ("-l", ["-l", "copyright"]),
+    ("-c", ["-c", "return"]),
+    ("-f", ["-f"]),
+    ("--type=cc", ["--type=cc", "struct"]),
+]
+
+
+def command(tool, args):
+    if tool == "perl ack":
+        return ["perl", "-I" + os.path.join(ACK3, "blib", "lib"), os.path.join(ACK3, "blib", "script", "ack"), "--noenv"] + args
+    if tool == "rask":
+        return [RASK, "--noenv"] + args
+    if tool == "grep -r":
+        # For reference only: grep searches everything, binary files included.
+        if args[0].startswith("-") and args[0] not in ("-i", "-w", "-v", "-c", "-l"):
+            return None
+        return ["grep", "-r", "-E"] + args + ["."]
+    raise ValueError(tool)
+
+
+def run(cmd, cwd):
+    start = time.perf_counter()
+    p = subprocess.run(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return time.perf_counter() - start, p
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--corpus", action="append")
+    ap.add_argument("--scenario", action="append")
+    ap.add_argument("--markdown")
+    ap.add_argument("--no-perl", action="store_true", help="skip timing Perl ack (still checks output)")
+    opts = ap.parse_args()
+
+    tools = ["rask", "grep -r"] + ([] if opts.no_perl else ["perl ack"])
+    rows = []
+    failures = 0
+    for cname in opts.corpus or CORPORA:
+        cwd = CORPORA[cname]
+        if not os.path.isdir(cwd):
+            print(f"skipping corpus {cname}: {cwd} not found", file=sys.stderr)
+            continue
+        for sname, args in SCENARIOS:
+            if opts.scenario and sname not in opts.scenario:
+                continue
+            _, perl = run(command("perl ack", args), cwd)
+            _, rask = run(command("rask", args), cwd)
+            same = (perl.stdout, perl.stderr, perl.returncode) == (rask.stdout, rask.stderr, rask.returncode)
+            if not same:
+                failures += 1
+            times = {}
+            for tool in tools:
+                cmd = command(tool, args)
+                if cmd is None:
+                    continue
+                run(cmd, cwd)  # warm up
+                times[tool] = statistics.median(run(cmd, cwd)[0] for _ in range(opts.runs))
+            speedup = times["perl ack"] / times["rask"] if "perl ack" in times else None
+            rows.append((cname, sname, times, speedup, same, len(perl.stdout.splitlines())))
+            fmt = lambda t: f"{t:.3f}s" if t is not None else "-"
+            print(
+                f"{cname:8} {sname:12} rask {fmt(times.get('rask'))}  perl {fmt(times.get('perl ack'))}  "
+                f"grep {fmt(times.get('grep -r'))}  "
+                + (f"{speedup:5.1f}x" if speedup else "")
+                + ("" if same else "  OUTPUT DIFFERS"),
+                flush=True,
+            )
+
+    if opts.markdown:
+        with open(opts.markdown, "w") as f:
+            f.write("| Corpus | Scenario | Lines | Perl ack | rask | Speed-up | grep -r | Same output |\n")
+            f.write("|---|---|---:|---:|---:|---:|---:|---|\n")
+            for cname, sname, times, speedup, same, lines in rows:
+                t = lambda k: f"{times[k]:.3f}s" if k in times else "-"
+                s = f"{speedup:.1f}×" if speedup else "-"
+                f.write(f"| {cname} | {sname} | {lines} | {t('perl ack')} | {t('rask')} | {s} | {t('grep -r')} | {'yes' if same else '**no**'} |\n")
+            speedups = [r[3] for r in rows if r[3]]
+            if speedups:
+                f.write(f"\nMedian speed-up over Perl ack: **{statistics.median(speedups):.1f}×**.\n")
+    if failures:
+        print(f"{failures} scenario(s) where rask's output differs from Perl ack's", file=sys.stderr)
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

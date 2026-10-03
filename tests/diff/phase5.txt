@@ -1,0 +1,25 @@
+# Output that depends on earlier files (heading, breaks, context separators,
+# -p, -1, -m, colour), over a tree big enough to run in parallel. Run with
+# scripts/diff-ack --cases; /usr/include exists on Linux (elsewhere, both
+# acks report it missing, which also matches).
+--heading --break struct /usr/include
+-C 1 volatile /usr/include
+-A 2 -B 1 --group EXPORT /usr/include
+-p 3 inline /usr/include
+-1 static /usr/include
+-m 2 define /usr/include
+-l -m 5 include /usr/include
+--column -w int /usr/include
+--color extern /usr/include
+--color --underline -w const /usr/include
+-o [A-Z]+_MAX /usr/include
+--output='$1:$.' '(lu)ck' /usr/include
+-H -c -v e /usr/include
+--passthru zzzq /usr/include
+-L struct /usr/include
+--sort-files -1 x /usr/include
+-g -i util /usr/include
+-f --print0 /usr/include
+-c --and=int --not=char long /usr/include
+--range-start=^struct '--range-end=^}' int /usr/include
+-v x /usr/include

@@ -14,6 +14,7 @@ pub mod filter;
 pub mod help;
 pub mod matcher;
 pub mod output;
+pub mod parallel;
 pub mod search;
 pub mod walk;
 

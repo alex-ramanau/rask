@@ -13,8 +13,17 @@ pub fn readable(meta: Option<&Metadata>) -> bool {
     use rustix::process::{getegid, geteuid, getgroups};
     use std::os::unix::fs::MetadataExt;
 
+    /// (euid, egid, supplementary groups), looked up once.
+    static IDS: std::sync::OnceLock<(u32, u32, Vec<u32>)> = std::sync::OnceLock::new();
+
     let Some(meta) = meta else { return false };
-    let euid = geteuid().as_raw();
+    let (euid, egid, groups) = IDS.get_or_init(|| {
+        let groups = getgroups()
+            .map(|g| g.iter().map(|g| g.as_raw()).collect())
+            .unwrap_or_default();
+        (geteuid().as_raw(), getegid().as_raw(), groups)
+    });
+    let euid = *euid;
     if euid == 0 {
         // Root can read anything.
         return true;
@@ -24,8 +33,7 @@ pub fn readable(meta: Option<&Metadata>) -> bool {
         return mode & 0o400 != 0;
     }
     let gid = meta.gid();
-    let in_group = getegid().as_raw() == gid
-        || getgroups().is_ok_and(|groups| groups.iter().any(|g| g.as_raw() == gid));
+    let in_group = *egid == gid || groups.contains(&gid);
     if in_group {
         return mode & 0o040 != 0;
     }

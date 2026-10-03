@@ -4,7 +4,8 @@ A Rust reimplementation of [ack 3](https://beyondgrep.com/), the grep-like
 source code search tool. The target is byte-for-byte parity with Perl ack
 3.10.0: same options, same output, same exit codes, same `.ackrc` handling.
 
-**Status: Phases 0–3 done.** rask passes the whole ack3 test suite on Linux
+**Status: Phases 0–3 and 5 done.** A median 8.5× faster than Perl ack
+(`docs/benchmarks.md`), with the same output. rask passes the whole ack3 test suite on Linux
 (87/87 test files, 839/839 tests; 12 tests of Perl internals are skipped,
 see `rust-skip.txt`). Known gaps are listed in the plan
 (`ack3/ack_rewrite_in_rust/phases/`).
@@ -16,6 +17,7 @@ see `rust-skip.txt`). Known gaps are listed in the plan
 | `src/` | the `rask` binary; one module per area (`cli`, `config`, `walk`, `filter`, `matcher`, `search`, `output`, `help`) |
 | `scripts/ack-suite` | runs ack3's own test suite against the rask binary and reports pass counts |
 | `scripts/diff-ack`, `tests/diff/` | runs Perl ack and rask on the same command lines and compares stdout, stderr and exit code |
+| `scripts/bench` | benchmarks against Perl ack and `grep -r`, checking the output is identical first |
 | `scripts/texttest-vs-perl` | property test: the port of Perl's `-T` against Perl, on thousands of random files |
 | `tests/ack3_filters.rs` | Rust ports of ack3's Perl-internals filter and iterator tests (need `ACK3_DIR`) |
 | `tests/ack3_config.rs` | Rust ports of `t/config-loader.t` and `t/config-finder.t` (self-contained) |
@@ -56,6 +58,7 @@ ACK3_DIR=../ack3 cargo test            # includes the ports of ack3's filter tes
 | `src/output/` | `App::Ack::say`/`warn`/`die`, pager, Term::ANSIColor |
 | `src/help/` | `--help`, `--help-types`, `--man`, `--version`, easter eggs |
 | `src/filetest.rs` | Perl's `-r` and `-R` |
+| `src/parallel.rs` | ordered parallel search: walker thread, workers, results in walk order |
 | `src/app.rs` | ack's `MAIN` block and file filters (`src/main.rs` just calls it) |
 
 ## Building on a VirtualBox shared folder

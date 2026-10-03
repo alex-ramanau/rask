@@ -3,34 +3,37 @@
 //! this heuristic part of ack's behaviour, so it's ported exactly.
 
 use std::io::Read;
-use std::path::Path;
+
+use super::File;
 
 /// Perl reads this much of the file.
-const BLOCK: usize = 512;
+pub const BLOCK: usize = 512;
 
-/// `-T $path`: true if the file looks like text.
-pub fn is_text(path: &Path) -> bool {
-    let Ok(mut f) = std::fs::File::open(path) else {
-        return false;
-    };
-    let Ok(meta) = f.metadata() else {
-        return false;
-    };
-    let mut buf = [0u8; BLOCK];
+/// Reads up to `BLOCK` bytes from the start of `f`.
+pub fn read_block(f: &mut std::fs::File) -> Result<Vec<u8>, std::io::Error> {
+    let mut buf = vec![0u8; BLOCK];
     let mut len = 0;
     while len < BLOCK {
         match f.read(&mut buf[len..]) {
             Ok(0) => break,
             Ok(n) => len += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(e) => return Err(e),
         }
     }
-    if len == 0 {
-        // An empty file is anything; a directory (NFS) is not text.
-        return !meta.is_dir();
+    buf.truncate(len);
+    Ok(buf)
+}
+
+/// `-T $file->name`: true if the file looks like text. Files that can't be
+/// opened or read aren't. An empty file is anything. (Perl also says a
+/// directory isn't text, but only files get here.)
+pub fn is_text(file: &File) -> bool {
+    match file.head() {
+        Ok([]) => true,
+        Ok(head) => looks_like_text(head),
+        Err(_) => false,
     }
-    looks_like_text(&buf[..len])
 }
 
 /// The textiness decision on the first block of a file.
