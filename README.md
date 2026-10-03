@@ -4,7 +4,7 @@ A Rust reimplementation of [ack 3](https://beyondgrep.com/), the grep-like
 source code search tool. The target is byte-for-byte parity with Perl ack
 3.10.0: same options, same output, same exit codes, same `.ackrc` handling.
 
-**Status: Phases 0–2 done.** rask passes the whole ack3 test suite on Linux
+**Status: Phases 0–3 done.** rask passes the whole ack3 test suite on Linux
 (87/87 test files, 839/839 tests; 12 tests of Perl internals are skipped,
 see `rust-skip.txt`). Known gaps are listed in the plan
 (`ack3/ack_rewrite_in_rust/phases/`).
@@ -18,6 +18,7 @@ see `rust-skip.txt`). Known gaps are listed in the plan
 | `scripts/diff-ack`, `tests/diff/` | runs Perl ack and rask on the same command lines and compares stdout, stderr and exit code |
 | `scripts/texttest-vs-perl` | property test: the port of Perl's `-T` against Perl, on thousands of random files |
 | `tests/ack3_filters.rs` | Rust ports of ack3's Perl-internals filter and iterator tests (need `ACK3_DIR`) |
+| `tests/ack3_config.rs` | Rust ports of `t/config-loader.t` and `t/config-finder.t` (self-contained) |
 | `scripts/sync-from-ack3` | regenerates the text rask embeds from ack3: default ackrc, `--help`, `--man`, `--bar`, `--cathy` |
 | `rust-skip.txt` | ack3 tests that only exercise Perl internals, with their planned Rust counterparts |
 | `scripts/regex-spike`, `tools/regex-spike/` | the regex engine comparison behind decision D1 |

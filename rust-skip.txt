@@ -8,8 +8,8 @@
 t/00-load.t                    # n/a: module loading
 t/build_regex.t                # matcher::build tests (partial: no full port yet)
 t/lowercase.t                  # matcher::build::lowercase_detection (partial)
-t/config-finder.t              # config::finder (todo)
-t/config-loader.t              # config (partial: defaults_parse, filter_specs)
+t/config-finder.t              # tests/ack3_config.rs (done)
+t/config-loader.t              # tests/ack3_config.rs (done)
 t/file-iterator.t              # tests/ack3_filters.rs (done)
 t/filter.t                     # tests/ack3_filters.rs (done; register_filter has no counterpart)
 t/default-filter.t             # tests/ack3_filters.rs (done), plus scripts/texttest-vs-perl
