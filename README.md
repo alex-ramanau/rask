@@ -1,78 +1,275 @@
 # rask
 
-A Rust reimplementation of [ack 3](https://beyondgrep.com/), the grep-like
-source code search tool. The target is byte-for-byte parity with Perl ack
-3.10.0: same options, same output, same exit codes, same `.ackrc` handling.
+**rask is [ack](https://beyondgrep.com/), the grep-like search tool for
+programmers, rewritten in Rust.**
 
-**Status: Phases 0–3 and 5 done.** A median 8.5× faster than Perl ack
-(`docs/benchmarks.md`), with the same output. rask passes the whole ack3 test suite on Linux
-(87/87 test files, 839/839 tests; 12 tests of Perl internals are skipped,
-see `rust-skip.txt`). Known gaps are listed in the plan
-(`ack3/ack_rewrite_in_rust/phases/`).
+It behaves like ack 3.10.0: the same options, the same output, the same exit
+codes and the same `.ackrc` files. If you know ack, you already know rask.
+It's just faster: a median **8.5× faster** than Perl ack on the
+[benchmarks](docs/benchmarks.md), with identical output.
 
-## Layout
-
-| Path | What |
-|---|---|
-| `src/` | the `rask` binary; one module per area (`cli`, `config`, `walk`, `filter`, `matcher`, `search`, `output`, `help`) |
-| `scripts/ack-suite` | runs ack3's own test suite against the rask binary and reports pass counts |
-| `scripts/diff-ack`, `tests/diff/` | runs Perl ack and rask on the same command lines and compares stdout, stderr and exit code |
-| `snap/snapcraft.yaml`, `docs/snap.md` | the snap (static binary, classic, amd64 + arm64) and how to publish it |
-| `scripts/bench` | benchmarks against Perl ack and `grep -r`, checking the output is identical first |
-| `scripts/texttest-vs-perl` | property test: the port of Perl's `-T` against Perl, on thousands of random files |
-| `tests/ack3_filters.rs` | Rust ports of ack3's Perl-internals filter and iterator tests (need `ACK3_DIR`) |
-| `tests/ack3_config.rs` | Rust ports of `t/config-loader.t` and `t/config-finder.t` (self-contained) |
-| `scripts/sync-from-ack3` | regenerates the text rask embeds from ack3: default ackrc, `--help`, `--man`, `--bar`, `--cathy` |
-| `rust-skip.txt` | ack3 tests that only exercise Perl internals, with their planned Rust counterparts |
-| `scripts/regex-spike`, `tools/regex-spike/` | the regex engine comparison behind decision D1 |
-| `docs/regex-compat.md` | regex decisions and the Perl behaviours rask must emulate |
-| `ci/ack3-test-binary.patch` | the `ACK_TEST_BINARY` harness change for ack3, applied in CI until merged upstream |
-
-## Running the ack3 test suite
-
-Perl ack is the spec, and its test suite is the conformance test. You need
-an ack3 checkout next to this one (or set `ACK3_DIR`), with the
-`ACK_TEST_BINARY` harness change and a built `blib/`:
-
-```sh
-cd ../ack3 && perl Makefile.PL && make && cd -   # needs File::Next and YAML::PP
-cargo build
-scripts/ack-suite                      # summary
-scripts/ack-suite --markdown out.md    # plus a per-file table
-scripts/ack-suite t/ack-w.t            # selected tests
-scripts/diff-ack -v -w foo t/text      # compare one command line with Perl ack
-scripts/diff-ack --cases tests/diff/phase1.txt
-scripts/diff-ack --cases tests/diff/phase2.txt
-ACK3_DIR=../ack3 cargo test            # includes the ports of ack3's filter tests
+```console
+$ rask -w threads src
+src/parallel.rs
+3://! The walk, the per-file work and the printing run on different threads:
+8://! - worker threads run the file filter and `Settings::prepare` (opening,
+48:/// The number of worker threads: the CPU count, or `RASK_THREADS` (for
 ```
 
-## How the code maps to Perl ack
+## Why ack (and rask)?
 
-| rask | Perl ack |
-|---|---|
-| `src/cli/getopt.rs` | Getopt::Long 2.54 (the parts ack configures) |
-| `src/config/` | `App::Ack::ConfigLoader`, `ConfigFinder`, `ConfigDefault` |
-| `src/filter/` | `App::Ack::File`, `App::Ack::Filter::*`, Perl's `-T` |
-| `src/walk/` | File::Next 1.18, `File::Spec::Unix` |
-| `src/matcher/` | `App::Ack::build_regex` and friends; Perl regex diagnostics |
-| `src/search/` | ack's file loops and `pmif_*` printers |
-| `src/output/` | `App::Ack::say`/`warn`/`die`, pager, Term::ANSIColor |
-| `src/help/` | `--help`, `--help-types`, `--man`, `--version`, easter eggs |
-| `src/filetest.rs` | Perl's `-r` and `-R` |
-| `src/parallel.rs` | ordered parallel search: walker thread, workers, results in walk order |
-| `src/app.rs` | ack's `MAIN` block and file filters (`src/main.rs` just calls it) |
+Compared with `grep -r`, ack is made for searching source code:
 
-## Building on a VirtualBox shared folder
+- **It searches the current directory tree by default.** No `-r`, no `.`.
+- **It skips what you don't want to see:** version control directories
+  (`.git`, `.svn`, ...), build output, backup files, minified JavaScript,
+  core dumps and binary files.
+- **It knows file types.** `--python`, `--js`, `--rust`, `--type=noxml`, and
+  about 80 more (`rask --help-types`).
+- **It uses Perl-compatible regular expressions** (PCRE2 in rask), with
+  `\d`, `\b`, lookarounds and the rest.
+- **Its output is easy to read:** matches are highlighted and grouped under
+  each file name.
 
-The linker writes corrupt binaries on `vboxsf` mounts (build scripts fail
-with "Exec format error"). Put the target directory on a local disk:
+rask adds:
+
+- **Speed.** Files are searched in parallel, and the output still comes
+  out in the same order as ack's.
+- **One self-contained binary.** No Perl and no CPAN modules to install.
+
+## Installing
+
+### Snap (Linux)
+
+Once rask is published in the Snap Store:
 
 ```sh
-export CARGO_TARGET_DIR=$HOME/.cache/rask-target
+sudo snap install rask --classic
 ```
 
-The scripts honour `CARGO_TARGET_DIR`.
+Until then, build from source (below), or build the snap yourself with
+`make snap` (see [docs/snap.md](docs/snap.md)).
+
+The snap command is `rask`. To run it as `ack` too:
+
+```sh
+sudo snap alias rask ack
+```
+
+### From source
+
+You need [Rust](https://rustup.rs/) 1.85 or newer and a C compiler (the
+PCRE2 library is built from source and linked in).
+
+```sh
+git clone https://github.com/alex-ramanau/rask.git
+cd rask
+make install          # installs to ~/.local/bin/rask
+```
+
+To install system-wide instead, run `make` and then
+`sudo install -m755 target/release/rask /usr/local/bin/`. Or use
+`cargo install --path .` if you'd rather not use `make`.
+
+rask is developed and tested on Linux. It builds and passes its own tests
+on macOS and Windows too, but hasn't been checked against the whole ack test
+suite there yet.
+
+## Examples
+
+Search the current directory tree for a pattern:
+
+```sh
+rask cache_size
+```
+
+Whole words only, ignoring case:
+
+```sh
+rask -w -i timeout
+```
+
+A literal string, with no regex meaning for `(`, `.`, `*` and so on:
+
+```sh
+rask -Q 'config.get('
+```
+
+### Choosing files
+
+Only Python files, or everything except JavaScript:
+
+```sh
+rask --python import
+rask --type=nojs TODO
+```
+
+Search only some directories or files:
+
+```sh
+rask handle_request src/ tests/
+```
+
+List the files rask would search, without searching them (`-f`), or only
+those whose name matches a pattern (`-g`):
+
+```sh
+rask -f --rust
+rask -g '_test\.go$'
+```
+
+See which file types rask knows and how it recognises them:
+
+```sh
+rask --help-types
+```
+
+Add your own type, for example for Jinja templates:
+
+```sh
+rask --type-add=jinja:ext:j2,jinja --jinja block
+```
+
+### Shaping the output
+
+Only the names of matching files (`-l`), or of files with no match (`-L`):
+
+```sh
+rask -l deprecated
+rask -L 'Copyright'
+```
+
+Count matches per file:
+
+```sh
+rask -c TODO
+```
+
+Show 2 lines of context around each match (`-C`), or 3 after (`-A 3`) or
+before (`-B 3`):
+
+```sh
+rask -C parse_args
+```
+
+Print only the matched text (`-o`), or build each output line from the
+match (`--output`, with `$1`..`$9`, `$&`, `$_`, `$.` for the line number and
+`$f` for the file name):
+
+```sh
+rask -o 'https?://\S+'
+rask --output='$1' 'version = "([^"]+)"' Cargo.toml
+rask -h --output='$f:$.:$&' 'TODO.*'   # -h: no extra file:line prefix
+```
+
+### Combining patterns
+
+Lines that contain `fn` and `pub`, but not `test`:
+
+```sh
+rask fn --and pub --not test
+```
+
+Search only between a start and an end pattern. Here `.` matches every
+line, so this prints one section of a file:
+
+```sh
+rask --range-start='^\[dependencies\]' --range-end='^$' . Cargo.toml
+```
+
+### In pipelines
+
+rask reads standard input when it's given no files, like grep:
+
+```sh
+git log --oneline | rask -i fix
+```
+
+Feed it a list of files with `-x` (or `--files-from=FILE`):
+
+```sh
+git diff --name-only | rask -x console.log
+```
+
+The exit code is 0 if something matched and 1 if nothing did, so rask
+works in scripts:
+
+```sh
+if rask -l 'password\s*=' config/ > /dev/null; then echo 'found a password'; fi
+```
+
+## Configuration
+
+Default options go in an `.ackrc` file, one option per line, exactly as for
+ack. rask reads `/etc/ackrc`, then `~/.ackrc` (or the file named by `$ACKRC`),
+then the nearest `.ackrc` in the current directory or above it. For example:
+
+```
+# ~/.ackrc
+--smart-case
+--ignore-dir=node_modules
+--type-add=jinja:ext:j2,jinja
+--pager=less -R
+```
+
+Useful commands:
+
+- `rask --create-ackrc` prints ack's built-in defaults as a starting point.
+- `rask --dump` shows which options are loaded, and from which file.
+- `rask --noenv` ignores every `.ackrc` file and `ACK_*` environment variable.
+
+The environment variables ack uses work too: `ACK_OPTIONS`, `ACK_PAGER`,
+`ACK_PAGER_COLOR`, `ACK_COLOR_MATCH` and the other `ACK_COLOR_*` variables,
+and `NO_COLOR`.
+
+## Documentation
+
+- `rask --help` for a summary of the options.
+- `rask --man` for the full manual (it's ack's manual: everything in it
+  applies to rask).
+- The [ack website](https://beyondgrep.com/documentation/) has more, including
+  how to [switch from grep](https://beyondgrep.com/why-ack/) and a
+  [comparison with similar tools](https://beyondgrep.com/feature-comparison/).
+
+## Differences from ack
+
+rask aims to have none in what it prints. It passes ack's own test suite on
+Linux (839 of 839 tests). The tests of ack's Perl internals don't apply; rask
+has its own tests for those parts.
+
+What's different:
+
+- `rask --version` prints `ack v3.10.0 (rask 0.1.0)`, so tools that check
+  ack's version still work.
+- Matching uses PCRE2 rather than Perl's regex engine. The two agree on
+  almost everything ack users write, and rask reproduces Perl's behaviour
+  and error messages where they differ; the details are in
+  [docs/regex-compat.md](docs/regex-compat.md).
+
+If you find a case where rask and ack disagree, please
+[open an issue](https://github.com/alex-ramanau/rask/issues) with the command
+line and both outputs.
+
+## Credits
+
+ack was created by **[Andy Lester](https://github.com/petdance)** in 2005,
+and is maintained by him with many contributors. Everything rask does, from
+the options to the file types to the output, comes from ack's design, and its
+help text and manual are ack's own. rask exists only because ack is worth
+having faster. Thank you, Andy.
+
+- ack's website: <https://beyondgrep.com/>
+- ack's source code: <https://github.com/beyondgrep/ack3>
+
+rask also relies on [PCRE2](https://github.com/PCRE2Project/pcre2) by Philip
+Hazel and its maintainers, and on the Rust [`pcre2`](https://crates.io/crates/pcre2)
+crate by Andrew Gallant.
+
+## Contributing
+
+See [docs/development.md](docs/development.md) for how the code is organised,
+how to build it, and how to run ack's test suite against rask.
 
 ## Licence
 
-Artistic License 2.0, like ack.
+Artistic License 2.0, the same as ack. ack is copyright 2005–2026 Andy Lester.
