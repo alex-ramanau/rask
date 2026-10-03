@@ -54,10 +54,17 @@ jobs:
           perl-version: '5.38'
           install-modules: File::Next YAML::PP ${{ runner.os == 'Windows' && 'Win32::ShellQuote' || 'IO::Pty' }}
       - uses: dtolnay/rust-toolchain@stable
+      # The perl steps use pwsh, not bash: on Windows, bash is Git Bash, whose
+      # own MSYS perl comes first on its PATH instead of the one set up above.
       - name: Build ack3 (some tests use App::Ack as the oracle)
-        shell: bash
+        shell: pwsh
         working-directory: ack3
-        run: perl Makefile.PL && $(perl -MConfig -e 'print $Config{make}')
+        run: |
+          perl Makefile.PL
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $make = perl -MConfig -e 'print $Config{make}'
+          & $make
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - run: cargo build
         working-directory: rask
       - name: Unit and integration tests, with ack3's fixtures
@@ -68,12 +75,13 @@ jobs:
       - run: cargo build --release
         working-directory: rask
       - name: Run the ack3 suite against rask
-        shell: bash
+        shell: pwsh
         working-directory: rask
         env:
           ACK3_DIR: ${{ github.workspace }}/ack3
-        # Reports pass counts; doesn't fail the job until Phase 4 makes the suite green.
-        run: perl scripts/ack-suite --markdown "$GITHUB_STEP_SUMMARY"
+        # Reports pass counts without failing the job: the suite is green on
+        # Linux, but macOS and Windows haven't been through it yet.
+        run: perl scripts/ack-suite --markdown $env:GITHUB_STEP_SUMMARY
       - name: Compare with Perl ack on the differential cases
         if: runner.os != 'Windows'
         working-directory: rask

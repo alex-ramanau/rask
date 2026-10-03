@@ -43,6 +43,21 @@ fn check_for_ackrc(dir: &[u8]) -> Option<Bytes> {
     files.into_iter().next()
 }
 
+/// On Unix, files are the same if they have the same inode.
+#[cfg(unix)]
+fn unique_key(path: Bytes) -> Bytes {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(to_path(&path)) {
+        Ok(m) => format!("{}:{}", m.dev(), m.ino()).into_bytes(),
+        Err(_) => path,
+    }
+}
+
+#[cfg(not(unix))]
+fn unique_key(path: Bytes) -> Bytes {
+    path
+}
+
 /// `_remove_redundancies`: drop files already seen (by inode on Unix).
 fn remove_redundancies(configs: Vec<ConfigFile>) -> Vec<ConfigFile> {
     let mut seen = HashSet::new();
@@ -50,18 +65,11 @@ fn remove_redundancies(configs: Vec<ConfigFile>) -> Vec<ConfigFile> {
         .into_iter()
         .filter(|c| {
             let path = to_path(&c.path);
-            let mut key = match std::fs::canonicalize(&path) {
+            let key = match std::fs::canonicalize(&path) {
                 Ok(real) => path_bytes(&real),
                 Err(_) => c.path.clone(),
             };
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                if let Ok(m) = std::fs::metadata(to_path(&key)) {
-                    key = format!("{}:{}", m.dev(), m.ino()).into_bytes();
-                }
-            }
-            seen.insert(key)
+            seen.insert(unique_key(key))
         })
         .collect()
 }
