@@ -10,13 +10,13 @@ t/build_regex.t                # matcher::build tests (partial: no full port yet
 t/lowercase.t                  # matcher::build::lowercase_detection (partial)
 t/config-finder.t              # config::finder (todo)
 t/config-loader.t              # config (partial: defaults_parse, filter_specs)
-t/file-iterator.t              # walk (partial: File::Spec only)
-t/filter.t                     # filter (partial)
-t/default-filter.t             # filter::texttest (partial)
-t/ext-filter.t                 # filter::single_filters (partial)
-t/firstlinematch-filter.t      # filter (todo)
-t/is-filter.t                  # filter::collection_groups (partial)
-t/match-filter.t               # filter::single_filters (partial)
+t/file-iterator.t              # tests/ack3_filters.rs (done)
+t/filter.t                     # tests/ack3_filters.rs (done; register_filter has no counterpart)
+t/default-filter.t             # tests/ack3_filters.rs (done), plus scripts/texttest-vs-perl
+t/ext-filter.t                 # tests/ack3_filters.rs (done)
+t/firstlinematch-filter.t      # tests/ack3_filters.rs (done)
+t/is-filter.t                  # tests/ack3_filters.rs (done)
+t/match-filter.t               # tests/ack3_filters.rs (done)
 #
 # Tests that run against rask but partly test Perl code:
 #   t/noenv.t        two of its subtests call App::Ack::ConfigLoader directly

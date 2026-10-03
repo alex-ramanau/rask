@@ -26,6 +26,7 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
+      # Tests that use ack3's fixtures skip themselves here; the ack-suite job runs them.
       - run: cargo test --all
 
   ack-suite:
@@ -59,6 +60,13 @@ jobs:
         run: perl Makefile.PL && $(perl -MConfig -e 'print $Config{make}')
       - run: cargo build
         working-directory: rask
+      - name: Unit and integration tests, with ack3's fixtures
+        run: cargo test --all
+        working-directory: rask
+        env:
+          ACK3_DIR: ${{ github.workspace }}/ack3
+      - run: cargo build --release
+        working-directory: rask
       - name: Run the ack3 suite against rask
         shell: bash
         working-directory: rask
@@ -66,3 +74,12 @@ jobs:
           ACK3_DIR: ${{ github.workspace }}/ack3
         # Reports pass counts; doesn't fail the job until Phase 4 makes the suite green.
         run: perl scripts/ack-suite --markdown "$GITHUB_STEP_SUMMARY"
+      - name: Compare with Perl ack on the differential cases
+        if: runner.os != 'Windows'
+        working-directory: rask
+        env:
+          ACK3_DIR: ${{ github.workspace }}/ack3
+        run: |
+          scripts/diff-ack --cases tests/diff/phase1.txt
+          scripts/diff-ack --cases tests/diff/phase2.txt
+          RASK=target/release/rask scripts/texttest-vs-perl 1 2 3

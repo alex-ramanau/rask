@@ -1,0 +1,53 @@
+# File selection (Phase 2). Run with scripts/diff-ack --cases; paths are
+# relative to the ack3 checkout. Unsorted -f output checks the walk order,
+# which depends on readdir, so it's compared with Perl on the same disk
+# rather than against a snapshot.
+-f t
+-f --sort-files t
+-f t/swamp t/text t/etc
+-f t/swamp/groceries t/swamp/groceries/fruit
+-f ./t/swamp
+-f t/swamp/
+-f -n t
+-f --follow t/swamp
+-f -k t/swamp
+-f -k --show-types t/swamp
+-f --show-types t/etc
+-g --show-types perl t/swamp
+-g -v '\.p[lm]$' t/swamp
+-g -i MAKEFILE t/swamp
+-g --not=PL make t/swamp
+-f --print0 t/text
+-f -t perl t/swamp
+-f -T perl t/swamp
+-f --type=noperl --type=perl t/swamp
+-f --perl --noperl t/swamp
+-f --type-set=foo:ext:foo --foo t/swamp
+-f --type-add=perl:ext:cgi --perl t/swamp
+-f --type-del=perl --perl t/swamp
+-f --type-add=xyz:is:Makefile --type-add=xyz:match:/^notes/ --xyz t/swamp
+-f --type-add=pyth:firstlinematch:/python/ --pyth t/swamp
+-f --type-add=bad t/swamp
+-f --type-add=bad:nope:x t/swamp
+-f --ignore-dir=groceries t/swamp
+-f --ignore-dir=groceries/ t/swamp
+-f --ignore-dir=match:^gro t/swamp
+-f --ignore-dir=ext:d t/swamp
+-f --ignore-dir=firstlinematch:x t/swamp
+-f --noignore-dir=CVS t/swamp
+-f --noignore-dir=CVS --ignore-dir=groceries t/swamp
+-f --ignore-dir=groceries --noignore-dir=groceries t/swamp
+-f --ignore-dir=t/swamp/groceries t
+-f --ignore-file=is:Makefile t/swamp
+-f --ignore-file=match:^perl t/swamp
+-f --ignore-file=ext:pl,pm t/swamp
+-f --ignore-file=firstlinematch:perl t/swamp
+-f --ignore-ack-defaults t/swamp
+-f --ignore-ack-defaults --ignore-dir=CVS t/swamp
+--files-from=t/swamp/groceries/fruit apple
+--files-from=nonexistent-list apple
+-f --help-types
+--help-types
+-f t/swamp/perl.pl t/swamp/moose-andy.jpg
+Apple t/swamp/moose-andy.jpg t/swamp/groceries/fruit
+-f nonexistent t/text
