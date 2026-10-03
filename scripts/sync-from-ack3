@@ -1,0 +1,26 @@
+#!/bin/sh
+# Regenerates the data files rask embeds from an ack3 checkout, so the two
+# can't drift: the default ackrc (App::Ack::ConfigDefault), the --help and
+# --man text, and the --bar and --cathy pictures.
+#
+#   ACK3_DIR=../ack3 scripts/sync-from-ack3
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+ack3=$(cd "${ACK3_DIR:-$here/../ack3}" && pwd)
+
+perl -I"$ack3/lib" -MApp::Ack::ConfigDefault -e \
+    'print "$_\n" for App::Ack::ConfigDefault::options()' >"$here/src/config/default_ackrc.txt"
+
+# show_help() has no interpolated values, so its output is the text itself.
+perl -I"$ack3/lib" -MApp::Ack -e 'App::Ack::show_help()' >"$here/src/help/help.txt"
+
+# --man: ack's POD rendered as plain text. Perl ack runs perldoc, whose
+# output through a pipe is close to this (Pod::Text); on a terminal perldoc
+# adds formatting and a pager, which rask doesn't.
+pod2text "$ack3/ack" >"$here/src/help/man.txt"
+
+# The --bar and --cathy easter eggs.
+perl -I"$ack3/lib" "$ack3/ack" --noenv --bar >"$here/src/help/bar.txt"
+perl -I"$ack3/lib" "$ack3/ack" --noenv --cathy >"$here/src/help/cathy.txt"
+
+echo "synced from ack3 $(git -C "$ack3" rev-parse --short HEAD)"

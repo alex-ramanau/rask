@@ -1,0 +1,49 @@
+#!/bin/sh
+# Property test for the port of Perl's -T (src/filter/texttest.rs): writes
+# thousands of random files, then compares which ones Perl ack and rask
+# consider text (they list exactly those with -f).
+#
+#   scripts/texttest-vs-perl [SEED...]     (default seeds: 1 2 3)
+set -eu
+here=$(cd "$(dirname "$0")/.." && pwd)
+ack3=$(cd "${ACK3_DIR:-$here/../ack3}" && pwd)
+rask="${RASK:-${CARGO_TARGET_DIR:-$here/target}/release/rask}"
+[ -x "$rask" ] || { echo "build rask first: cargo build --release" >&2; exit 2; }
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+[ $# -gt 0 ] || set -- 1 2 3
+status=0
+for seed in "$@"; do
+    rm -rf "$work/files" && mkdir "$work/files"
+    python3 - "$seed" "$work/files" <<'PY'
+import random, sys
+random.seed(int(sys.argv[1]))
+pools = [
+    bytes(range(32, 127)) + b"\n\t\r",   # text
+    bytes(range(0, 32)),                  # control characters
+    bytes(range(128, 256)),               # high bytes
+    bytes(range(256)),                    # anything
+    b"\xfe\xff\x80\x81\x82\x8f\x90\xbf\xc0\xc1\xc2\xe0\xed\xf0\xf4\xf5\xf8\xfc",  # UTF-8 edge cases
+    bytes(range(0x80, 0xc0)),             # continuation bytes
+]
+for n in range(3000):
+    size = random.choice([1, 2, 3, 5, 7, 13, 14, 100, 511, 512, 513, 1000])
+    weights = [random.random() for _ in pools]
+    data = bytearray()
+    while len(data) < size:
+        if random.random() < 0.1:
+            data += random.choice("éüñ€漢字😀\U0010ffff").encode()
+        else:
+            data.append(random.choice(random.choices(pools, weights)[0]))
+    open(f"{sys.argv[2]}/f{n:04d}.dat", "wb").write(bytes(data))
+PY
+    (cd "$work/files" && perl -I"$ack3/blib/lib" "$ack3/blib/script/ack" --noenv -f --sort-files . >"$work/perl.txt")
+    (cd "$work/files" && "$rask" --noenv -f --sort-files . >"$work/rask.txt")
+    n=$(diff "$work/perl.txt" "$work/rask.txt" | grep -c '^[<>]' || true)
+    echo "seed $seed: $(wc -l <"$work/perl.txt") of 3000 files are text to Perl; $n differ"
+    if [ "$n" != 0 ]; then
+        status=1
+        diff "$work/perl.txt" "$work/rask.txt" | grep '^[<>]' | head -5 | while read -r _ f; do xxd "$work/files/$f" | head -2; done
+    fi
+done
+exit $status

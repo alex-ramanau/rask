@@ -13,8 +13,10 @@ use warnings;
 
 use Cwd qw( abs_path );
 use File::Basename qw( dirname );
+use File::Spec;
 use Getopt::Long;
 use TAP::Harness;
+use TAP::Parser;
 
 my $here = abs_path( dirname(__FILE__) . '/..' );
 my $binary = ( $ENV{CARGO_TARGET_DIR} // "$here/target" ) . '/debug/rask' . ( $^O eq 'MSWin32' ? '.exe' : '' );
@@ -38,18 +40,43 @@ while ( <$fh> ) {
 close $fh;
 
 chdir $ack3 or die "$ack3: $!";
+
+# If stdin were a pipe, ack would read it instead of searching files.
+open( STDIN, '<', File::Spec->devnull ) or die "Can't reopen STDIN: $!";
 my @tests = @ARGV ? @ARGV : sort glob('t/*.t');
 my @run = grep { !$skip{$_} } @tests;
 
 $ENV{ACK_TEST_BINARY} = $binary;
 my $harness = TAP::Harness->new( { lib => [ 'blib/lib', 'blib/arch' ], verbosity => -2, merge => 1 } );
+# t/yaml.t runs every t/*.yaml file as one subtest each; report those separately.
+my @yaml_rows;
+my $yaml_run = grep { $_ eq 't/yaml.t' } @run;
+@run = grep { $_ ne 't/yaml.t' } @run;
 my $agg = $harness->runtests(@run);
+
+if ( $yaml_run ) {
+    my $parser = TAP::Parser->new( { source => 't/yaml.t', switches => [ '-Iblib/lib', '-Iblib/arch' ] } );
+    while ( my $result = $parser->next ) {
+        next unless $result->is_test;
+        ( my $name = $result->description ) =~ s/^- //;
+        push @yaml_rows, [ "t/yaml.t: $name", $result->is_ok ? 1 : 0, 1, $result->is_ok ? 'PASS' : 'FAIL' ];
+    }
+}
 
 my ( $files_ok, $pass_total, $plan_total ) = ( 0, 0, 0 );
 my @rows;
 for my $test (@tests) {
     if ( $skip{$test} ) {
         push @rows, [ $test, '', '', 'skipped (Perl internals)' ];
+        next;
+    }
+    if ( $test eq 't/yaml.t' ) {
+        push @rows, @yaml_rows;
+        for my $row ( @yaml_rows ) {
+            $files_ok++ if $row->[3] eq 'PASS';
+            $pass_total += $row->[1];
+            $plan_total += 1;
+        }
         next;
     }
     my ($p) = $agg->parsers($test);
@@ -62,8 +89,9 @@ for my $test (@tests) {
     push @rows, [ $test, $passed, $planned, $ok ? 'PASS' : 'FAIL' ];
 }
 
-my $summary = sprintf( "%d/%d test files pass, %d/%d top-level tests pass, %d skipped",
-    $files_ok, scalar @run, $pass_total, $plan_total, scalar(@tests) - scalar(@run) );
+my $nfiles = @run + @yaml_rows;
+my $summary = sprintf( "%d/%d test files pass (counting each t/*.yaml separately), %d/%d top-level tests pass, %d skipped",
+    $files_ok, $nfiles, $pass_total, $plan_total, scalar(grep { $skip{$_} } @tests) );
 
 my $table = "| Test | Passed | Planned | Status |\n|---|---:|---:|---|\n"
           . join( '', map { "| $_->[0] | $_->[1] | $_->[2] | $_->[3] |\n" } @rows );

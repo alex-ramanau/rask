@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Differential check: runs Perl ack and rask with the same arguments, in the
+# ack3 checkout, and compares stdout, stderr and the exit code.
+#
+#   scripts/diff-ack [-v] ARGS...        one command line
+#   scripts/diff-ack [-v] --cases FILE    one command line per line of FILE
+#                                        (split like a shell would)
+#
+# ACK3_DIR (default ../ack3) needs a built blib/. Stdin is /dev/null unless
+# the line starts with "stdin=FILE ".
+set -u
+here=$(cd "$(dirname "$0")/.." && pwd)
+ack3=$(cd "${ACK3_DIR:-$here/../ack3}" && pwd)
+rask="${RASK:-${CARGO_TARGET_DIR:-$here/target}/debug/rask}"
+verbose=0
+[ "${1:-}" = "-v" ] && { verbose=1; shift; }
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+fails=0
+total=0
+
+run_case() {
+    local stdin=/dev/null
+    if [[ "$1" == stdin=* ]]; then stdin="${1#stdin=}"; shift; fi
+    total=$((total + 1))
+    (cd "$ack3" && perl -Iblib/lib blib/script/ack --noenv "$@" <"$stdin" >"$tmp/p.out" 2>"$tmp/p.err"; echo $? >"$tmp/p.rc")
+    (cd "$ack3" && "$rask" --noenv "$@" <"$stdin" >"$tmp/r.out" 2>"$tmp/r.err"; echo $? >"$tmp/r.rc")
+    local what=""
+    cmp -s "$tmp/p.out" "$tmp/r.out" || what="$what stdout"
+    cmp -s "$tmp/p.err" "$tmp/r.err" || what="$what stderr"
+    cmp -s "$tmp/p.rc" "$tmp/r.rc" || what="$what exit($(cat "$tmp/p.rc") vs $(cat "$tmp/r.rc"))"
+    if [ -n "$what" ]; then
+        fails=$((fails + 1))
+        printf 'DIFF%s: ack %s\n' "$what" "$*"
+        if [ $verbose = 1 ]; then
+            diff "$tmp/p.out" "$tmp/r.out" | head -20
+            diff "$tmp/p.err" "$tmp/r.err" | head -10
+        fi
+    fi
+}
+
+if [ "${1:-}" = "--cases" ]; then
+    while IFS= read -r line; do
+        [ -z "$line" ] || [[ "$line" == \#* ]] && continue
+        eval "set -- $line"
+        run_case "$@"
+    done <"$2"
+else
+    run_case "$@"
+fi
+echo "$((total - fails))/$total identical"
+[ $fails = 0 ]
