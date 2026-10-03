@@ -33,7 +33,9 @@ jobs:
           sudo snap install --dangerous --classic ${{ steps.build.outputs.snap }}
           rask --version
           printf 'hello\nworld\n' > /tmp/rask-smoke.txt
-          test "$(rask --noenv world /tmp/rask-smoke.txt)" = world
+          # --nofilter: the runner gives the step a piped stdin, which (as in ack)
+          # would make rask search stdin and ignore the file argument.
+          test "$(rask --noenv --nofilter world /tmp/rask-smoke.txt)" = world
       - uses: actions/upload-artifact@v4
         with:
           name: rask-snap-${{ matrix.arch }}
