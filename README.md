@@ -5,7 +5,7 @@ programmers, rewritten in Rust.**
 
 It behaves like ack 3.10.0: the same options, the same output, the same exit
 codes and the same `.ackrc` files. If you know ack, you already know rask.
-It's just faster: a median **8.5× faster** than Perl ack on the
+It's just faster: a median **8.1× faster** than Perl ack on the
 [benchmarks](docs/benchmarks.md), with identical output.
 
 ```console

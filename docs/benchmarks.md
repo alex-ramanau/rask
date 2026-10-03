@@ -4,60 +4,59 @@ Produced by `scripts/bench` (plan item 5.1). Before timing anything, the
 script checks that rask's stdout, stderr and exit code are the same as Perl
 ack's for every scenario. The last column records that check.
 
-**Result: rask is a median 8.5× faster than Perl ack 3.10.0** (5.4× at
-worst), up from 3.1× for the Phase 1 build. Output is the same in every
-scenario.
+**Result: rask is a median 8.1× faster than Perl ack 3.10.0** (4.9× at
+worst), with the same output in every scenario. Measured on 2026-10-03.
 
 ## Method
 
 - Machine: a VirtualBox VM with 4 vCPUs (AMD Ryzen AI MAX+ 395 host), Linux 6.8,
   ext4, warm page cache. Perl 5.38.2.
-- Each scenario runs once untimed, then 5 timed runs; the median wall time
-  is shown.
+- Each scenario runs once untimed, then 5 timed runs (`scripts/bench --runs 5`);
+  the median wall time is shown.
 - Corpora, all local:
   - **go**: `~/go`, 1.2 GB of Go modules, 33,550 files (31,504 selected)
-  - **include**: `/usr/include`, 4,893 C headers
-  - **share**: `/usr/share`, 27,068 files, many small and many not text
+  - **include**: `/usr/include`, 5,111 files, mostly C headers
+  - **share**: `/usr/share`, 27,106 files (15,051 selected), many small and many not text
 - `grep -r` is for reference only. It searches every file, binary files
   included, and has no type filters.
 
 ## Results
 
-| Corpus | Scenario | Output lines | Perl ack | rask (Phase 1) | rask (now) | Speed-up | grep -r | Same output as Perl |
-|---|---|---:|---:|---:|---:|---:|---:|---|
-| go | `literal` | 27245 | 1.581s | 0.506s | 0.198s | 8.0× | 0.416s | yes |
-| go | `literal -i` | 29664 | 1.763s | 0.523s | 0.221s | 8.0× | 0.571s | yes |
-| go | `no match` | 0 | 0.758s | 0.352s | 0.092s | 8.2× | 0.432s | yes |
-| go | `alternation` | 25923 | 1.539s | 0.470s | 0.166s | 9.3× | 0.589s | yes |
-| go | `regex` | 36851 | 1.637s | 0.757s | 0.245s | 6.7× | 0.559s | yes |
-| go | `-w` | 153540 | 3.003s | 0.767s | 0.375s | 8.0× | 0.700s | yes |
-| go | `-v -c` | 31504 | 2.727s | 0.744s | 0.273s | 10.0× | 0.778s | yes |
-| go | `-l` | 631 | 0.797s | 0.358s | 0.094s | 8.5× | 0.432s | yes |
-| go | `-c` | 31504 | 1.864s | 0.639s | 0.226s | 8.2× | 0.487s | yes |
-| go | `-f` | 31504 | 0.574s | 0.200s | 0.061s | 9.4× | - | yes |
-| go | `--type=cc` | 259 | 0.452s | 0.123s | 0.052s | 8.7× | - | yes |
-| include | `literal` | 4571 | 0.287s | 0.078s | 0.031s | 9.3× | 0.059s | yes |
-| include | `literal -i` | 4932 | 0.298s | 0.081s | 0.031s | 9.6× | 0.057s | yes |
-| include | `no match` | 0 | 0.136s | 0.050s | 0.014s | 9.7× | 0.031s | yes |
-| include | `alternation` | 686 | 0.239s | 0.066s | 0.021s | 11.4× | 0.057s | yes |
-| include | `regex` | 260 | 0.178s | 0.124s | 0.033s | 5.4× | 0.044s | yes |
-| include | `-w` | 137117 | 0.651s | 0.152s | 0.074s | 8.8× | 0.111s | yes |
-| include | `-v -c` | 4893 | 0.430s | 0.126s | 0.041s | 10.5× | 0.048s | yes |
-| include | `-l` | 478 | 0.144s | 0.054s | 0.015s | 9.6× | 0.032s | yes |
-| include | `-c` | 4893 | 0.310s | 0.102s | 0.033s | 9.4× | 0.047s | yes |
-| include | `-f` | 4893 | 0.102s | 0.025s | 0.008s | 12.7× | - | yes |
-| include | `--type=cc` | 36849 | 0.443s | 0.108s | 0.052s | 8.5× | - | yes |
-| share | `literal` | 13733 | 0.869s | 0.302s | 0.128s | 6.8× | 0.302s | yes |
-| share | `literal -i` | 16694 | 0.987s | 0.323s | 0.145s | 6.8× | 0.419s | yes |
-| share | `no match` | 0 | 0.475s | 0.213s | 0.061s | 7.8× | 0.254s | yes |
-| share | `alternation` | 11424 | 1.000s | 0.300s | 0.129s | 7.8× | 0.374s | yes |
-| share | `regex` | 4106 | 0.699s | 0.355s | 0.121s | 5.8× | 0.304s | yes |
-| share | `-w` | 3492 | 1.149s | 0.360s | 0.164s | 7.0× | 0.366s | yes |
-| share | `-v -c` | 15022 | 1.142s | 0.348s | 0.129s | 8.9× | 0.429s | yes |
-| share | `-l` | 1217 | 0.517s | 0.234s | 0.066s | 7.8× | 0.256s | yes |
-| share | `-c` | 15022 | 0.791s | 0.304s | 0.108s | 7.3× | 0.283s | yes |
-| share | `-f` | 15022 | 0.376s | 0.135s | 0.042s | 9.0× | - | yes |
-| share | `--type=cc` | 110 | 0.302s | 0.097s | 0.035s | 8.6× | - | yes |
+| Corpus | Scenario | Output lines | Perl ack | rask (2026-10-03) | Speed-up | grep -r | Same output as Perl |
+|---|---|---:|---:|---:|---:|---:|---|
+| go | `literal` | 27245 | 1.595s | 0.197s | 8.1× | 0.432s | yes |
+| go | `literal -i` | 29664 | 1.742s | 0.214s | 8.1× | 0.584s | yes |
+| go | `no match` | 0 | 0.756s | 0.089s | 8.5× | 0.439s | yes |
+| go | `alternation` | 25923 | 1.547s | 0.163s | 9.5× | 0.602s | yes |
+| go | `regex` | 36851 | 1.693s | 0.236s | 7.2× | 0.568s | yes |
+| go | `-w` | 153540 | 3.019s | 0.392s | 7.7× | 0.704s | yes |
+| go | `-v -c` | 31504 | 2.726s | 0.291s | 9.4× | 0.791s | yes |
+| go | `-l` | 631 | 0.821s | 0.095s | 8.6× | 0.447s | yes |
+| go | `-c` | 31504 | 1.904s | 0.236s | 8.1× | 0.501s | yes |
+| go | `-f` | 31504 | 0.578s | 0.066s | 8.8× | - | yes |
+| go | `--type=cc` | 259 | 0.454s | 0.056s | 8.1× | - | yes |
+| include | `literal` | 4590 | 0.282s | 0.032s | 8.7× | 0.068s | yes |
+| include | `literal -i` | 4954 | 0.296s | 0.033s | 9.0× | 0.063s | yes |
+| include | `no match` | 0 | 0.141s | 0.016s | 8.7× | 0.034s | yes |
+| include | `alternation` | 708 | 0.262s | 0.024s | 10.9× | 0.064s | yes |
+| include | `regex` | 260 | 0.195s | 0.039s | 4.9× | 0.063s | yes |
+| include | `-w` | 138322 | 0.667s | 0.075s | 8.9× | 0.111s | yes |
+| include | `-v -c` | 5111 | 0.434s | 0.045s | 9.7× | 0.051s | yes |
+| include | `-l` | 479 | 0.151s | 0.015s | 10.3× | 0.033s | yes |
+| include | `-c` | 5111 | 0.316s | 0.039s | 8.1× | 0.052s | yes |
+| include | `-f` | 5111 | 0.111s | 0.012s | 9.3× | - | yes |
+| include | `--type=cc` | 37605 | 0.452s | 0.053s | 8.5× | - | yes |
+| share | `literal` | 13761 | 0.888s | 0.126s | 7.1× | 0.385s | yes |
+| share | `literal -i` | 16722 | 1.018s | 0.148s | 6.9× | 0.422s | yes |
+| share | `no match` | 0 | 0.478s | 0.060s | 8.0× | 0.257s | yes |
+| share | `alternation` | 11443 | 0.994s | 0.126s | 7.9× | 0.371s | yes |
+| share | `regex` | 4106 | 0.713s | 0.124s | 5.7× | 0.309s | yes |
+| share | `-w` | 3493 | 1.144s | 0.165s | 6.9× | 0.371s | yes |
+| share | `-v -c` | 15051 | 1.139s | 0.133s | 8.6× | 0.442s | yes |
+| share | `-l` | 1223 | 0.533s | 0.067s | 7.9× | 0.256s | yes |
+| share | `-c` | 15051 | 0.791s | 0.107s | 7.4× | 0.288s | yes |
+| share | `-f` | 15051 | 0.395s | 0.042s | 9.5× | - | yes |
+| share | `--type=cc` | 110 | 0.295s | 0.044s | 6.8× | - | yes |
 
 ## What made the difference
 

@@ -6,7 +6,7 @@ Notes for working on rask itself. The user documentation is the
 A Rust reimplementation of [ack 3](https://beyondgrep.com/). The target is byte-for-byte parity with Perl ack
 3.10.0: same options, same output, same exit codes, same `.ackrc` handling.
 
-**Status: Phases 0–3 and 5 done.** A median 8.5× faster than Perl ack
+**Status: Phases 0–3 and 5 done.** A median 8.1× faster than Perl ack
 (`docs/benchmarks.md`), with the same output. rask passes the whole ack3 test suite on Linux
 (87/87 test files, 839/839 tests; 12 tests of Perl internals are skipped,
 see `rust-skip.txt`). Known gaps are listed in the plan
