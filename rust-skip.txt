@@ -1,0 +1,24 @@
+# ack3 tests that scripts/ack-suite doesn't run against rask.
+#
+# These tests call Perl internals (App::Ack::*, File::Next) directly and never
+# run the ack binary, so they would pass whatever rask does. Each one needs a
+# Rust unit-test counterpart before Phase 4 closes (plan item 0.2).
+#
+# test file                    Rust counterpart
+t/00-load.t                    # n/a: module loading
+t/build_regex.t                # matcher / regex construction (Phase 1)
+t/lowercase.t                  # smart-case detection (Phase 1)
+t/config-finder.t              # config::finder (Phase 3)
+t/config-loader.t              # config::loader (Phase 3)
+t/file-iterator.t              # walk (Phase 2)
+t/filter.t                     # filter (Phase 2)
+t/default-filter.t             # filter::default, the -T port (Phase 2)
+t/ext-filter.t                 # filter::ext (Phase 2)
+t/firstlinematch-filter.t      # filter::firstlinematch (Phase 2)
+t/is-filter.t                  # filter::is (Phase 2)
+t/match-filter.t               # filter::match (Phase 2)
+#
+# Tests that run against rask but pin Perl-specific text, which rask will
+# need its own wording for:
+#   t/no-re-eval.t   expects Perl's "Eval-group not allowed at runtime"
+#   t/noenv.t        two of its subtests call App::Ack::ConfigLoader directly

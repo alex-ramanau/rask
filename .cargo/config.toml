@@ -1,0 +1,4 @@
+[env]
+# Always build the bundled PCRE2 and link it statically, rather than using a
+# system libpcre2. Same PCRE2 version on every platform; single binary (plan D1).
+PCRE2_SYS_STATIC = "1"

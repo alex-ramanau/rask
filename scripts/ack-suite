@@ -1,0 +1,77 @@
+#!/usr/bin/env perl
+
+# Runs the ack3 test suite against the rask binary (plan item 0.2).
+#
+#   scripts/ack-suite [--binary PATH] [--markdown FILE] [t/some-test.t ...]
+#
+# ACK3_DIR points at the ack3 checkout (default ../ack3). Tests listed in
+# rust-skip.txt only exercise Perl internals and are reported as skipped.
+# Exits 0 whatever the results are; the point is to report them.
+
+use strict;
+use warnings;
+
+use Cwd qw( abs_path );
+use File::Basename qw( dirname );
+use Getopt::Long;
+use TAP::Harness;
+
+my $here = abs_path( dirname(__FILE__) . '/..' );
+my $binary = ( $ENV{CARGO_TARGET_DIR} // "$here/target" ) . '/debug/rask' . ( $^O eq 'MSWin32' ? '.exe' : '' );
+my $markdown;
+GetOptions( 'binary=s' => \$binary, 'markdown=s' => \$markdown ) or exit 2;
+
+my $ack3 = abs_path( $ENV{ACK3_DIR} // "$here/../ack3" ) or die "No ack3 checkout; set ACK3_DIR\n";
+-x $binary or die "$binary is not executable; run cargo build first\n";
+$binary = abs_path($binary);
+
+# Some tests load App::Ack modules as the oracle for expected output.
+-d "$ack3/blib" or die "$ack3/blib is missing; run perl Makefile.PL && make in $ack3\n";
+
+my %skip;
+open( my $fh, '<', "$here/rust-skip.txt" ) or die "rust-skip.txt: $!";
+while ( <$fh> ) {
+    s/#.*//;
+    my ($file) = split;
+    $skip{$file} = 1 if $file;
+}
+close $fh;
+
+chdir $ack3 or die "$ack3: $!";
+my @tests = @ARGV ? @ARGV : sort glob('t/*.t');
+my @run = grep { !$skip{$_} } @tests;
+
+$ENV{ACK_TEST_BINARY} = $binary;
+my $harness = TAP::Harness->new( { lib => [ 'blib/lib', 'blib/arch' ], verbosity => -2, merge => 1 } );
+my $agg = $harness->runtests(@run);
+
+my ( $files_ok, $pass_total, $plan_total ) = ( 0, 0, 0 );
+my @rows;
+for my $test (@tests) {
+    if ( $skip{$test} ) {
+        push @rows, [ $test, '', '', 'skipped (Perl internals)' ];
+        next;
+    }
+    my ($p) = $agg->parsers($test);
+    my $planned = $p->tests_planned // $p->tests_run;
+    my $passed  = scalar $p->passed;
+    my $ok = !$p->has_problems;
+    $files_ok++ if $ok;
+    $pass_total += $passed;
+    $plan_total += $planned;
+    push @rows, [ $test, $passed, $planned, $ok ? 'PASS' : 'FAIL' ];
+}
+
+my $summary = sprintf( "%d/%d test files pass, %d/%d top-level tests pass, %d skipped",
+    $files_ok, scalar @run, $pass_total, $plan_total, scalar(@tests) - scalar(@run) );
+
+my $table = "| Test | Passed | Planned | Status |\n|---|---:|---:|---|\n"
+          . join( '', map { "| $_->[0] | $_->[1] | $_->[2] | $_->[3] |\n" } @rows );
+
+print "\n$summary\n";
+if ( $markdown ) {
+    open( my $out, '>>', $markdown ) or die "$markdown: $!";
+    print {$out} "## ack3 test suite against rask\n\n$summary\n\n$table\n";
+    close $out;
+}
+exit 0;

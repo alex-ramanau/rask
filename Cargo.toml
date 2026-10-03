@@ -1,0 +1,39 @@
+[workspace]
+members = [".", "tools/regex-spike"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "Artistic-2.0"
+repository = "https://github.com/CHANGEME/rask"
+
+[workspace.dependencies]
+pcre2 = "0.2.11"
+
+[package]
+name = "rask"
+version = "0.1.0"
+description = "A Rust reimplementation of ack 3, the grep-like source code search tool"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# The name `rask` is taken on crates.io. Pick a publishable name before release (plan D7).
+publish = false
+
+[[bin]]
+name = "rask"
+path = "src/main.rs"
+
+[dependencies]
+pcre2.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

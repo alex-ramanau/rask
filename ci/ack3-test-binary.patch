@@ -1,0 +1,79 @@
+diff --git a/t/Util.pm b/t/Util.pm
+index a2de506..46b66b3 100644
+--- a/t/Util.pm
++++ b/t/Util.pm
+@@ -36,6 +36,7 @@ our @EXPORT = qw(
+     first_line_like
+     build_ack_invocation
+     adjust_executable
++    ack_test_binary
+ 
+     read_file
+     write_file
+@@ -188,7 +189,10 @@ sub build_ack_invocation {
+         unshift( @args, '--noenv' );
+     }
+ 
+-    if ( $ENV{'ACK_TEST_STANDALONE'} ) {
++    if ( my $binary = ack_test_binary() ) {
++        unshift( @args, $binary );
++    }
++    elsif ( $ENV{'ACK_TEST_STANDALONE'} ) {
+         unshift( @args, File::Spec->rel2abs( 'ack-standalone', $orig_wd ) );
+     }
+     else {
+@@ -679,6 +683,7 @@ sub _record_option_coverage {
+     my ( @command_line ) = @_;
+ 
+     return unless $ENV{ACK_OPTION_COVERAGE};
++    return if ack_test_binary();
+     return if $ENV{ACK_TEST_STANDALONE}; # We don't need to record the second time around.
+ 
+     my $record_options = File::Spec->catfile( $orig_wd, 'dev', 'record-options' );
+@@ -954,6 +959,23 @@ sub untaint {
+ }
+ 
+ 
++=head2 ack_test_binary()
++
++If the ACK_TEST_BINARY environment variable is set, returns the absolute
++path of the executable it names.  The test suite then runs that executable
++directly instead of running blib/script/ack under perl.  This lets the
++suite be used against other implementations of ack.
++
++=cut
++
++sub ack_test_binary {
++    my $binary = $ENV{ACK_TEST_BINARY};
++    return unless defined($binary) && ($binary ne '');
++
++    return untaint( File::Spec->rel2abs( $binary, $orig_wd ) );
++}
++
++
+ sub caret_X {
+     return untaint( $^X ); # XXX How is it $^X can be tainted?  We should not have to untaint it.
+ }
+@@ -1230,6 +1252,9 @@ sub make_unreadable {
+ sub adjust_executable {
+     my @cmd = @_;
+ 
++    # A native ack binary (see ack_test_binary()) is run as-is, not through perl.
++    return @cmd if ack_test_binary();
++
+     my $perl = caret_X();
+ 
+     # ACK_TEST_MODULE_OPTS
+diff --git a/t/run_yaml_test.py b/t/run_yaml_test.py
+index 0350d84..602f254 100644
+--- a/t/run_yaml_test.py
++++ b/t/run_yaml_test.py
+@@ -85,6 +85,8 @@ def run_case(case):
+     for args in case['args']:
+         if os.getenv('DIRK'):
+             command = ['./dirk', '--nocolor']
++        elif os.getenv('ACK_TEST_BINARY'):
++            command = [os.path.abspath(os.getenv('ACK_TEST_BINARY')), '--noenv']
+         else:
+             command = ['perl', '-Mblib', 'ack', '--noenv']
+         command += args.split()
